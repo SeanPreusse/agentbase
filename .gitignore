@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.agentbase/
+*.tgz
+.DS_Store
+coverage/
+build/
+test-results/

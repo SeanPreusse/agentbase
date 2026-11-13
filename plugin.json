@@ -1,0 +1,21 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "agentbase",
+  "version": "0.7.0",
+  "description": "Persistent project memory, plans, evidence-backed tasks, handoffs, and local data analysis for agents.",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "AgentBase",
+        "shortDescription": "Keep project work connected across sessions.",
+        "longDescription": "Local project memory, plans, evidence-backed tasks, handoffs, and reproducible data analysis for AI agents.",
+        "developerName": "AgentBase",
+        "category": "Productivity",
+        "capabilities": ["Read", "Write"],
+        "brandColor": "#1B6770",
+        "composerIcon": "./assets/composer-icon.png",
+        "logo": "./assets/logo.png"
+      }
+    }
+  }
+}

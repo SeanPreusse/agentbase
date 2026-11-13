@@ -1,0 +1,83 @@
+import { DatabaseSync } from 'node:sqlite';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { createInterface } from 'node:readline';
+import { readFile, mkdir, copyFile, chmod, mkdtemp, rm, realpath } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+
+const exec = promisify(execFile);
+const PLUGIN = 'agentbase@agentbase-local';
+export interface ConnectionOptions { source: string; codex?: string; codexHome?: string; node?: string; }
+export interface ConnectionState { codex_available: boolean; installed: boolean; enabled: boolean; version?: string; install_available: boolean; message: string; reconnect_required: boolean; tool_count?: number; checked_at?: string; backup?: string; }
+
+// Bounded local protocol client. No turns, prompts, credentials, or approval changes.
+async function rpc(command: string, args: string[], env: NodeJS.ProcessEnv, cwd: string) {
+  const child=spawn(command,args,{env,cwd,stdio:['pipe','pipe','pipe']});
+  const pending=new Map<number,{resolve:(v:any)=>void;reject:(e:Error)=>void;timer:NodeJS.Timeout}>();let id=0;
+  const lines=createInterface({input:child.stdout});child.stderr.on('data',()=>{});child.stdin.on('error',()=>{});
+  const fail=(error:Error)=>{for(const p of pending.values()){clearTimeout(p.timer);p.reject(error);}pending.clear();};
+  child.on('error',fail);child.on('exit',()=>fail(new Error('Local setup process stopped before replying.')));
+  lines.on('line',line=>{if(line.length>2*1024*1024){child.kill();fail(new Error('Setup response exceeded its limit.'));return;}let m:any;try{m=JSON.parse(line);}catch{return;}
+    if(m.method){if(m.id!==undefined)child.stdin.write(JSON.stringify({id:m.id,error:{code:-32601,message:'Setup does not allow interactive requests.'}})+'\n');return;}
+    const p=pending.get(m.id);if(!p)return;pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(new Error(String(m.error.message))):p.resolve(m.result);
+  });
+  const request=(method:string,params:unknown={})=>new Promise<any>((resolve,reject)=>{const key=++id;const timer=setTimeout(()=>{pending.delete(key);reject(new Error('Local setup timed out.'));child.kill();},12000);pending.set(key,{resolve,reject,timer});child.stdin.write(JSON.stringify({jsonrpc:'2.0',id:key,method,params})+'\n');});
+  const notify=(method:string)=>child.stdin.write(JSON.stringify({jsonrpc:'2.0',method})+'\n');
+  const stop=async()=>{lines.close();if(!child.pid||child.exitCode!==null||child.signalCode!==null)return;await new Promise<void>(resolve=>{child.once('exit',()=>resolve());child.kill();const timer=setTimeout(()=>child.kill('SIGKILL'),1000);timer.unref();child.once('exit',()=>clearTimeout(timer));});};
+  try {await new Promise<void>((resolve,reject)=>{child.once('spawn',()=>resolve());child.once('error',reject);});}
+  catch(error){lines.close();throw error;}
+  return {request,notify,stop};
+}
+
+export class CodexConnection {
+  readonly home:string; readonly env:NodeJS.ProcessEnv; readonly codex:string;
+  constructor(readonly options:ConnectionOptions){this.home=resolve(options.codexHome??process.env.CODEX_HOME??join(homedir(),'.codex'));this.codex=options.codex??'codex';this.env={...process.env,CODEX_HOME:this.home};}
+  private async command(args:string[]){const {stdout}=await exec(this.codex,[...args,'--json'],{env:this.env,cwd:homedir(),timeout:25000,maxBuffer:2*1024*1024});return JSON.parse(stdout);}
+  private async sourceAvailable(){try{const manifest=JSON.parse(await readFile(join(this.options.source,'plugin.json'),'utf8'));await readFile(join(this.options.source,'dist/cli.js'));return manifest.name==='agentbase';}catch{return false;}}
+  async status():Promise<ConnectionState>{
+    const install_available=await this.sourceAvailable();
+    try {const listing=await this.command(['plugin','list']);const plugin=listing.installed?.find((p:any)=>p.pluginId===PLUGIN);
+      return {codex_available:true,installed:!!plugin,enabled:plugin?.enabled===true,version:plugin?.version,install_available,message:plugin?(plugin.enabled?'Enabled for new Codex sessions.':'Disabled for new Codex sessions.'):'Install AgentBase with its memory, planning and analysis skills.',reconnect_required:false};
+    }catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return {codex_available:false,installed:false,enabled:false,install_available,message:'Codex CLI was not found. Install Codex, then rebuild or reopen Agentbase.',reconnect_required:false};throw new Error('Could not read Codex plugin settings. Check your Codex installation.');}
+  }
+  private async backup(){const directory=await mkdtemp(join(this.home,'agentbase-setup-backup-'));await chmod(directory,0o700);try{await copyFile(join(this.home,'config.toml'),join(directory,'config.toml'));await chmod(join(directory,'config.toml'),0o600);}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}return directory;}
+  private async setEnabled(enabled:boolean){const host=await rpc(this.codex,['app-server','--stdio'],this.env,homedir());try{
+    await host.request('initialize',{clientInfo:{name:'agentbase-setup',version:'1.0.0'},capabilities:{experimentalApi:true}});host.notify('initialized');
+    await host.request('config/value/write',{keyPath:`plugins."${PLUGIN}".enabled`,value:enabled,mergeStrategy:'replace'});
+  }finally{await host.stop();}}
+  private async installedRoot(version:string|undefined){if(!version || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(version))throw new Error('Installed plugin version is invalid.');const root=join(this.home,'plugins/cache/agentbase-local/agentbase',version);const manifest=JSON.parse(await readFile(join(root,'plugin.json'),'utf8'));if(manifest.name!=='agentbase'||manifest.version!==version)throw new Error('Installed plugin files do not match Codex settings. Reinstall Agentbase.');return root;}
+  async perform(action:'status'|'install'|'enable'|'disable'|'check'):Promise<ConnectionState>{
+    const before=await this.status();if(action==='status'||!before.codex_available)return before;
+    if(action==='check'){
+      if(!before.installed)throw new Error('Install Agentbase before checking setup.');
+      const root=await this.installedRoot(before.version);const scratch=await mkdtemp(join(tmpdir(),'agentbase-connection-check-'));let server:Awaited<ReturnType<typeof rpc>>|undefined;
+      try{server=await rpc(this.options.node??process.execPath,[join(root,'bin/agentbase.mjs'),'serve'],{...this.env,AGENTBASE_HOME:join(scratch,'state')},root);
+        const hello=await server.request('initialize',{protocolVersion:'2025-11-25',capabilities:{},clientInfo:{name:'agentbase-setup-check',version:'1.0.0'}});server.notify('notifications/initialized');const tools=await server.request('tools/list');
+        if(hello.serverInfo?.version!==before.version || !['project_open','context_get','task_claim','analysis_run'].every(name=>tools.tools?.some((t:any)=>t.name===name)))throw new Error('Installed server did not expose the expected Agentbase tools.');
+        return {...before,tool_count:tools.tools.length,checked_at:new Date().toISOString(),message:`Setup passed · ${tools.tools.length} tools available. This checks the installed server, not an existing Codex session.`};
+      }finally{await server?.stop();await rm(scratch,{recursive:true,force:true});}
+    }
+    if(action!=='install'&&!before.installed)throw new Error('Install Agentbase first.');
+    await mkdir(this.home,{recursive:true});
+    const lock=new DatabaseSync(join(this.home,'agentbase-setup.sqlite'),{timeout:1000});
+    try{await chmod(join(this.home,'agentbase-setup.sqlite'),0o600);lock.exec('CREATE TABLE IF NOT EXISTS setup_lock (id INTEGER PRIMARY KEY); BEGIN IMMEDIATE;');}
+    catch{lock.close();throw new Error('Another setup action is running. Wait for it to finish, then retry.');}
+    let backup:string|undefined;
+    try{
+      backup=await this.backup();
+      if(action==='install'){
+        if(!before.install_available)throw new Error('Plugin source is unavailable. Rebuild the inspector from the Agentbase package.');
+        const markets=await this.command(['plugin','marketplace','list']);const existing=markets.marketplaces?.find((m:any)=>m.name==='agentbase-local');
+        if(existing && (await realpath(existing.root))!==(await realpath(this.options.source)))throw new Error('agentbase-local belongs to another installation. It was left unchanged.');
+        if(!existing)await this.command(['plugin','marketplace','add',resolve(this.options.source)]);
+        await this.command(['plugin','add',PLUGIN]);
+      }else await this.setEnabled(action==='enable');
+      const after=await this.status();const wanted=action!=='disable';
+      if(action==='install'){const sourceManifest=JSON.parse(await readFile(join(this.options.source,'plugin.json'),'utf8'));if(after.version!==sourceManifest.version)throw new Error('Codex did not install the expected Agentbase version. Refresh the marketplace and retry.');await this.installedRoot(after.version);}
+      if(!after.installed||after.enabled!==wanted)throw new Error('Codex did not confirm the requested setting. A project or managed policy may override it.');
+      return {...after,backup,reconnect_required:true,message:wanted?'Enabled. Reconnect Codex or start a new session to load Agentbase.':'Disabled for new sessions. Reconnect existing sessions to unload Agentbase. Your project memory is retained.'};
+    }catch(error){throw new Error(`${(error as Error).message}${backup?` Settings backup: ${backup}`:''}`);}
+    finally{lock.exec('ROLLBACK;');lock.close();}
+  }
+}

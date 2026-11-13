@@ -1,0 +1,60 @@
+{
+  "name": "agentbase",
+  "version": "0.7.0",
+  "description": "Persistent project memory, evidence-backed tasks, handoffs, and local analysis for AI agents.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "bin": {
+    "agentbase": "bin/agentbase.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "skills",
+    "native",
+    "assets",
+    "scripts/native-ui.mjs",
+    "plugin.json",
+    "mcp.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs",
+    "start": "node bin/agentbase.mjs serve",
+    "demo": "npm run build && node examples/demo.mjs",
+    "test:package": "npm run build && node scripts/smoke-package.mjs",
+    "test:installed": "node scripts/battle-installed.mjs",
+    "test:analysis": "node scripts/test-data-analysis.mjs",
+    "test:projects": "node scripts/test-project-management.mjs",
+    "test:recovery": "node scripts/test-recovery.mjs",
+    "eval:memory": "node scripts/evaluate-memory.mjs",
+    "plugin:up": "node scripts/plugin-dev.mjs up",
+    "plugin:down": "node scripts/plugin-dev.mjs down",
+    "plugin:status": "node scripts/plugin-dev.mjs status",
+    "prepack": "npm run build",
+    "ui:build": "node scripts/native-ui.mjs",
+    "ui": "node scripts/native-ui.mjs --open",
+    "test:ui": "node scripts/test-native-ui.mjs",
+    "test:graph": "node scripts/test-graph.mjs"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "2.0.0-r.1",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "^4.3.6"
+  },
+  "bundledDependencies": [
+    "@duckdb/node-api",
+    "@modelcontextprotocol/sdk",
+    "zod"
+  ],
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}
