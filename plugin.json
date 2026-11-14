@@ -2,13 +2,13 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agentbase",
   "version": "0.7.5",
-  "description": "Persistent project memory, plans, evidence-backed tasks, handoffs, and local data analysis for agents.",
+  "description": "Local project storage and memory, tasks, handoffs, and DuckDB data analysis for AI agents.",
   "extensions": {
     "com.openai": {
       "interface": {
         "displayName": "AgentBase",
         "shortDescription": "Keep project work connected across sessions.",
-        "longDescription": "Local project memory, plans, evidence-backed tasks, handoffs, and reproducible data analysis for AI agents.",
+        "longDescription": "Local project storage and memory, plans, evidence-backed tasks, handoffs, and DuckDB-powered data analysis for AI agents.",
         "developerName": "AgentBase",
         "category": "Productivity",
         "capabilities": ["Read", "Write"],

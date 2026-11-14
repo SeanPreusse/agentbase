@@ -10,7 +10,7 @@ import { schemas, type ToolName } from './schemas.js';
 import { doctor } from './doctor.js';
 import { VERSION } from './version.js';
 
-const help = `Agentbase ${VERSION} — persistent local project memory for agents
+const help = `Agentbase ${VERSION} — local project storage and memory for agents
 
 Usage:
   agentbase serve                         Start the stdio MCP server
