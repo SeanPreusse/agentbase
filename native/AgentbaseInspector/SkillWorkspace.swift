@@ -69,7 +69,7 @@ final class SkillCatalogModel: ObservableObject {
     private var loadRevision = 0
     private var loading = false
     private let bundled: [(slug: String, title: String, description: String, triggers: [String], tags: [String], applies: [String])] = [
-        ("agentbase-resume", "Continue project work", "Resume work using project memory, plans, tasks, decisions, and handoffs.", ["continue project", "resume work", "switch workspace"], ["continuity", "handoff", "tasks", "planning"], ["project work", "coding", "planning"]),
+        ("agentbase-resume", "Continue project work", "Track and resume substantive project work, including research, reviews, audits, investigations, and coding, using project memory, tasks, and handoffs.", ["continue project", "resume work", "switch workspace", "review a project", "research a project", "audit a project", "investigate a project"], ["continuity", "handoff", "tasks", "planning", "review", "research", "audit", "investigation"], ["project work", "coding", "planning", "research", "reviews", "audits", "investigations"]),
         ("agentbase-analyse", "Analyze local data", "Import and analyze CSV, JSON, JSONL, or Parquet project data with Agentbase.", ["analyze data", "import csv", "inspect dataset"], ["csv", "json", "jsonl", "parquet", "analysis"], ["data analysis", "project data"]),
         ("agentbase-recover", "Back up and restore Agentbase", "Back up, verify, or restore Agentbase project state.", ["back up project", "restore project", "recover state"], ["backup", "restore", "recovery"], ["project recovery", "data safety"])
     ]
