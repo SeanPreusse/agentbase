@@ -1,14 +1,14 @@
 # AgentBase
 
-**Local-first storage and memory for AI agents.** Keep project knowledge, tasks, data, and analysis together so work can pick up again in a fresh session.
+**Open-source project state for coding agents.**
 
-AgentBase is an MCP server, Codex plugin, and macOS inspector for persistent project state. Its local SQLite store keeps knowledge and work history; DuckDB powers sandboxed SQL analysis over imported project data. Claude Code can connect through MCP.
+AgentBase stores tasks, decisions, sources, and handoffs in a local project database. Codex and Claude Code retrieve project context through MCP; the macOS app lets you inspect the graph and task board.
 
-## App preview
+## See it in action
 
-![AgentBase inspector switching between its project graph and All-tasks board](docs/screenshots/showcase.gif)
+![AgentBase title card followed by live Graph and Tasks views of the same import-reliability demo project](docs/screenshots/showcase.gif)
 
-[Graph screenshot](docs/screenshots/graph.png) · [All-tasks screenshot](docs/screenshots/kanban.png)
+[Graph](docs/screenshots/graph.png) · [Tasks](docs/screenshots/kanban.png)
 
 ## What it does
 
