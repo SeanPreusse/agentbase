@@ -65,10 +65,15 @@ enum GraphCameraPersistence {
         self.nodes = nodes; self.edges = edges
         var updated = particles.filter { ids.contains($0.key) }
         var hierarchy: [String: GraphEdge] = [:]
+        var adjacency: [String:[String]] = [:]
         func priority(_ relation: String) -> Int { relation == "child" ? 3 : relation == "plan" ? 2 : relation == "contains" ? 1 : 0 }
-        for edge in edges where priority(edge.relation) > 0 {
-            let child = edge.relation == "plan" ? edge.source : edge.target
-            if priority(edge.relation) > priority(hierarchy[child]?.relation ?? "") { hierarchy[child] = edge }
+        for edge in edges {
+            adjacency[edge.source,default:[]].append(edge.target)
+            adjacency[edge.target,default:[]].append(edge.source)
+            if priority(edge.relation) > 0 {
+                let child = edge.relation == "plan" ? edge.source : edge.target
+                if priority(edge.relation) > priority(hierarchy[child]?.relation ?? "") { hierarchy[child] = edge }
+            }
         }
         var pending = nodes.enumerated().filter { updated[$0.element.id] == nil }
         while !pending.isEmpty {
@@ -82,11 +87,7 @@ enum GraphCameraPersistence {
                 let parent = hierarchy[node.id].flatMap { edge in
                     updated[edge.source == node.id ? edge.target : edge.source] == nil ? nil : edge
                 }
-                let connected = edges.compactMap { edge -> CGPoint? in
-                    if edge.source == node.id { return updated[edge.target]?.point }
-                    if edge.target == node.id { return updated[edge.source]?.point }
-                    return nil
-                }
+                let connected = (adjacency[node.id] ?? []).compactMap { updated[$0]?.point }
                 let point: CGPoint
                 if node.kind == "project" && !hadExisting {
                     let projectIndex = nodes[..<i].filter { $0.kind == "project" }.count
@@ -214,6 +215,7 @@ struct GraphWorkspace: View {
     @State private var knownIDs = Set<String>()
     @State private var restoredPositionsFor: String?
     @State private var restoredCameraFor: String?
+    @State private var lastGraphSignature = ""
     @State private var cachedProjectOwners: [String:String] = [:]
     @State private var cachedProjectColors: [String:Color] = [:]
     @State private var didFit = false
@@ -237,7 +239,7 @@ struct GraphWorkspace: View {
     }
     var graphEdges: [GraphEdge] { let ids = Set(graphNodes.map(\.id)); return (payload?.edges ?? []).filter { ids.contains($0.source) && ids.contains($0.target) } }
     var matches: [GraphNode] {query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty ? graphNodes : model.currentSearch?.nodes ?? []}
-    var signature: String { graphNodes.map(\.id).joined() + graphEdges.map { $0.source + $0.target + $0.relation }.joined() }
+    private var graphSignature: String { graphNodes.map(\.id).joined() + graphEdges.map { $0.source + $0.target + $0.relation }.joined() }
     func neighborhood(_ id: String, edges: [GraphEdge]) -> Set<String> { var ids: Set<String> = [id], frontier: Set<String> = [id]; for _ in 0..<2 { var next = Set<String>(); for edge in edges where edge.relation != "contains" || edge.source == id { if frontier.contains(edge.source) { next.insert(edge.target) }; if frontier.contains(edge.target) { next.insert(edge.source) } }; next.subtract(ids); ids.formUnion(next); frontier = next }; return ids }
     var body: some View {
         GeometryReader { geometry in
@@ -275,10 +277,12 @@ struct GraphWorkspace: View {
                     Spacer()
                     Button(action:fit) { Image(systemName:"arrow.up.left.and.arrow.down.right").frame(width:28,height:28) }.buttonStyle(.plain).foregroundStyle(.secondary).help("Fit graph · 0")
                 }.padding(.leading,62).padding(.trailing,18).padding(.vertical,18) }
-            }.onAppear { size = geometry.size; sync() }.onChange(of:geometry.size) { _,value in size = value }
+            }.onAppear { size = geometry.size; syncIfChanged(force:true) }.onChange(of:geometry.size) { _,value in size = value }
         }.onChange(of:model.projectID) { _,_ in knownIDs = []; restoredPositionsFor = nil; restoredCameraFor = nil; didFit = false; didSettleFit = false; cameraTouched = false; offset = .zero; layout.particles = [:]; layout.births = [:]; layout.edgeBirths = [:]; sync() }
          .onChange(of:model.graphQuery) { _,value in if value.count>200 {model.graphQuery=String(value.prefix(200))};model.scheduleGraphSearch() }
-         .onChange(of:model.graphFocusRequest) { _,_ in focusRequested() }.onChange(of:model.includeBackground) { _,_ in model.start() }.onChange(of:signature) { _,_ in sync() }
+         .onChange(of:model.receivedAt) { _,_ in syncIfChanged() }
+         .onChange(of:hidden) { _,_ in syncIfChanged() }
+         .onChange(of:model.graphFocusRequest) { _,_ in focusRequested() }.onChange(of:model.includeBackground) { _,_ in model.start() }
          .onReceive(timer) { _ in if running && model.viewMode == "Graph" { layout.step(); if layout.heat < 0.08 && !didSettleFit { if !cameraTouched { fit() }; didSettleFit = true; savePositions() } } }
     }
     var controls: some View {
@@ -357,6 +361,12 @@ struct GraphWorkspace: View {
         if restoredCamera { didFit = true }
         else if !didFit && !graphNodes.isEmpty { fit(); didFit = true }
         focusRequested()
+    }
+    func syncIfChanged(force: Bool = false) {
+        let next = graphSignature
+        guard force || next != lastGraphSignature else { return }
+        lastGraphSignature = next
+        sync()
     }
     func savePositions() {
         let saved = Dictionary(uniqueKeysWithValues:layout.particles.map { ($0.key,[Double($0.value.point.x),Double($0.value.point.y)]) })
