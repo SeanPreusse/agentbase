@@ -48,7 +48,7 @@ struct KanbanWorkspace: View {
                     }.pickerStyle(.menu).frame(maxWidth:220)
                     WorkspaceViewToggle(model:model)
                     RecentChangesButton(model:model)
-                    ConnectionsButton(model:model.connections)
+                    ConnectionsButton(model:model.connections,selectedTask:model.selected?.kind == "task" ? model.selected : nil)
                     Spacer()
                     Picker("Status",selection:$model.boardFilter) {ForEach(["All","Open","Needs attention","Done"],id:\.self){Text($0).tag($0)}}.pickerStyle(.menu).frame(width:180).help("All includes tasks in every status; choose a project to show one workspace or All Projects to combine them.")
                     TextField("Search tasks",text:$model.boardQuery).textFieldStyle(.roundedBorder).frame(width:200)

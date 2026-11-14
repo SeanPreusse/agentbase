@@ -8,12 +8,14 @@ import { runAnalysisWorker } from './analysis.js';
 import { Recovery } from './backup.js';
 import { projectGraph } from './graph.js';
 import { recommendSkills } from './skills.js';
+import { VERSION } from './version.js';
 
 export class Agentbase {
   constructor(public store: Store) {}
 
   async call<K extends ToolName>(name: K, raw: unknown): Promise<any> {
     const input = schemas[name].parse(raw) as Inputs[K];
+    if (name === 'mcp_status') return this.mcpStatus((input as Inputs['mcp_status']).project_id);
     if (name === 'project_open') return this.open(input as Inputs['project_open']);
     if (name === 'project_resume') {
       const p = input as Inputs['project_resume'];
@@ -84,6 +86,36 @@ export class Agentbase {
       }
       default: throw new Error(`Unsupported tool ${name}`);
     }
+  }
+  private mcpStatus(projectId?: string) {
+    const schemaVersion = this.store.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value;
+    const tables = new Set(this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row: any) => row.name));
+    const projects = Number(this.store.db.prepare('SELECT COUNT(*) AS count FROM projects').get()?.count ?? 0);
+    const schemaReady = schemaVersion === '2' && ['projects', 'records', 'search_index', 'requests'].every(name => tables.has(name));
+    let searchIndexAvailable = false;
+    if (schemaReady) {
+      this.store.db.prepare('SELECT rowid FROM search_index LIMIT 1').get();
+      searchIndexAvailable = true;
+    }
+    const storeReady = schemaReady && searchIndexAvailable;
+    let project: any = undefined;
+    if (projectId) {
+      try {
+        const found = this.store.project(projectId);
+        project = { available: true, id: found.id, name: found.name, registered_roots: this.store.roots(projectId).length };
+      } catch (error: any) {
+        if (error.code !== 'NOT_FOUND') throw error;
+        project = { available: false, id: projectId, action: 'Use project_list or project_open to select a registered project.' };
+      }
+    }
+    return {
+      status: storeReady ? 'ready' : 'degraded',
+      server: { status: 'responding', version: VERSION, node: process.versions.node },
+      storage: { status: storeReady ? 'ready' : 'degraded', schema_version: schemaVersion ?? null, projects,
+        search_index_available: searchIndexAvailable },
+      ...(project ? { project } : {}),
+      sandbox: { status: 'not_probed', action: 'Run `agentbase doctor` for an end-to-end sandbox check.' },
+    };
   }
   async open(input: Inputs['project_open']) {
     const { root, repository_key } = await repositoryIdentity(input.root);

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { Store } from './store.js';
 import { Agentbase } from './service.js';
-import { descriptions, serve } from './server.js';
+import { descriptions, outputSchemas, serve, toolTitle } from './server.js';
 import { schemas, type ToolName } from './schemas.js';
 import { doctor } from './doctor.js';
 import { VERSION } from './version.js';
@@ -16,7 +16,7 @@ Usage:
   agentbase serve                         Start the stdio MCP server
   agentbase init [project-directory]      Register a local project
   agentbase call <tool> [json | @file | -] Call a tool (use - for stdin)
-  agentbase tools [tool]                  List tools or show an input schema
+  agentbase tools [tool]                  List tools or show input and output schemas
   agentbase config                       Print local Codex MCP configuration
   agentbase status [project-directory]    Show project tasks and recent activity
   agentbase inspect [--watch] [--project <id>]  Read-only JSON for the native inspector
@@ -56,8 +56,10 @@ export async function main(args = process.argv.slice(2)) {
     if (rest[0]) {
       if (!(rest[0] in schemas)) throw new Error('Unknown tool.');
       const name = rest[0] as ToolName;
-      console.log(JSON.stringify({ name, description: descriptions[name], inputSchema: z.toJSONSchema(schemas[name], { io: 'input' }) }, null, 2));
-    } else console.log(Object.entries(descriptions).map(([name, description]) => `${name}\n  ${description}`).join('\n\n'));
+      console.log(JSON.stringify({ name, title: toolTitle(name), description: descriptions[name],
+        inputSchema: z.toJSONSchema(schemas[name], { io: 'input' }),
+        ...(outputSchemas[name] ? { outputSchema: z.toJSONSchema(outputSchemas[name]!, { io: 'output' }) } : {}) }, null, 2));
+    } else console.log(Object.entries(descriptions).map(([name, description]) => `${toolTitle(name as ToolName)} (${name})\n  ${description}`).join('\n\n'));
     return;
   }
   if (command === 'inspect') {

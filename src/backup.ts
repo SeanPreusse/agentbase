@@ -12,14 +12,14 @@ const MAX_FILE = 50 * 1024 * 1024;
 const MAX_METADATA = 32 * 1024 * 1024;
 const MAX_TOTAL = 1024 * 1024 * 1024;
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-const id = z.string().max(100).regex(new RegExp(`^(project|task|plan|session|memory|decision|checkpoint|dataset|analysis)_${uuid}$`));
+const id = z.string().max(100).regex(new RegExp(`^(project|task|plan|session|memory|decision|checkpoint|dataset|analysis|skill)_${uuid}$`));
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const timestamp = z.string().datetime();
 const text = z.string().min(1).max(12000);
 const short = z.string().min(1).max(500);
 const extension = z.enum(['.csv', '.json', '.jsonl', '.ndjson', '.parquet']);
 const evidence = z.array(z.object({ kind: z.enum(['test', 'commit', 'file', 'analysis', 'manual']), reference: short, outcome: text }).passthrough()).max(30);
-const recordSchema = z.object({ id, project_id: id, kind: z.enum(['task', 'plan', 'session', 'memory', 'decision', 'checkpoint', 'dataset', 'analysis']),
+const recordSchema = z.object({ id, project_id: id, kind: z.enum(['task', 'plan', 'session', 'memory', 'decision', 'checkpoint', 'dataset', 'analysis', 'skill']),
   version: z.number().int().positive(), created_at: timestamp, updated_at: timestamp, body: z.record(z.string(), z.unknown()) }).strict();
 const recordReceipt = z.object({ record_id: id }).strict();
 const attachmentReceipt = z.object({ project_id: id, working_root: text, roots: z.array(text).max(1000) }).strict();
@@ -71,6 +71,9 @@ function validateBody(record: RecordData) {
     case 'dataset': z.object({ name: short, source: text, snapshot: text, sha256: digest, bytes: z.number().int().min(0).max(MAX_FILE), extension,
       dataset_version: z.number().int().positive(), previous_version_id: id.optional(), row_count: z.string().regex(/^\d+$/),
       schema: z.array(z.object({ name: z.string(), type: z.string() })), sample: z.array(z.array(z.unknown())).max(5) }).passthrough().parse(body); break;
+    case 'skill': z.object({ title: short, description: text, triggers: z.array(short).max(50), tags: z.array(short).max(50),
+      applies_to: z.array(short).max(50), source: z.string().trim().min(1).max(2000).regex(/^(https?:\/\/|file:\/\/|\/)/),
+      category: z.enum(['General', 'Coding', 'Research', 'Data', 'Planning', 'Writing']), status: z.enum(['active', 'disabled']) }).passthrough().parse(body); break;
     case 'analysis': z.object({ title: short, sql: z.string().min(1).max(16000), ...taskReference, executed_at: timestamp, engine: short,
       datasets: z.array(z.object({ id, sha256: digest, alias: z.string() })).min(1).max(10),
       columns: z.array(z.object({ name: z.string(), type: z.string() })), rows: z.array(z.array(z.unknown())).max(1000),

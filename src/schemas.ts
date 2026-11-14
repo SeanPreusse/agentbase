@@ -14,6 +14,7 @@ const taskSource = z.object({ kind: z.enum(['record', 'web', 'document', 'file']
 const memoryStatus = z.enum(['active', 'disputed', 'stale', 'superseded', 'forgotten']);
 
 export const schemas = {
+  mcp_status: z.object({ project_id: id.optional() }).strict(),
   project_open: z.object({ root: text, name: short.optional(), goal: text.optional() }).strict(),
   project_resume: z.object({ root: text, name: short.optional(), goal: text.optional(), task_id: id.optional(), query: short.optional(),
     max_chars: z.number().int().min(1000).max(24000).default(8000) }).strict(),

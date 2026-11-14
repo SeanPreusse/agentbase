@@ -123,6 +123,7 @@ struct ConnectionReply: Decodable {
 }
 struct ConnectionsButton: View {
     @ObservedObject var model: ConnectionsModel
+    var selectedTask: Entry? = nil
     @State private var presented=false
     var body: some View {
         Button {presented.toggle()} label:{Image(systemName:"puzzlepiece.extension")}
@@ -163,8 +164,9 @@ struct ConnectionsButton: View {
                         Button {model.refreshAll()} label:{Image(systemName:"arrow.clockwise")}.buttonStyle(.plain).help("Refresh connections")
                     }.font(.caption).disabled(model.busy)
                     Text("Reconnect after changes · Your data stays in AgentBase.").font(.caption2).foregroundStyle(.secondary)
+                    BringYourOwnAISection(task:selectedTask,home:model.storeHome)
                     if let backup=model.state?.backup {DisclosureGroup("Settings backup") {Text(backup).font(.caption2.monospaced()).textSelection(.enabled)}}
-                }.padding(16).frame(width:330).onAppear {model.refreshAll()}
+                }.padding(16).frame(width:360).onAppear {model.refreshAll()}
             }
     }
     var status: String {

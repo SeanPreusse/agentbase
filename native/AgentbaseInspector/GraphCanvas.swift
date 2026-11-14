@@ -323,7 +323,7 @@ struct GraphWorkspace: View {
                 Button {if let id=model.currentProject?.id {model.showInGraph(id)}} label:{Image(systemName:"folder")}.buttonStyle(.plain).help("Project folder: " + model.projectFolder).accessibilityLabel("Project folder")
             }
             RecentChangesButton(model:model)
-                    ConnectionsButton(model:model.connections)
+                    ConnectionsButton(model:model.connections,selectedTask:model.selected?.kind == "task" ? model.selected : nil)
             Rectangle().fill(Color.white.opacity(0.12)).frame(width:1,height:16)
             Image(systemName:"magnifyingglass").font(.caption).foregroundStyle(.secondary)
             TextField(model.isAllProjects ? "Search all projects" : "Search project",text:$model.graphQuery).textFieldStyle(.plain).font(.caption).frame(width:140).focused($searchFocused).onSubmit { if let first = model.currentSearch?.nodes.first { selectSearchResult(first) } }.help(model.isAllProjects ? "Search all saved project records · / to focus, Return to open" : "Search saved project text, sources and SQL · / to focus, Return to open")

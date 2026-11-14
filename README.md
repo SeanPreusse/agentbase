@@ -19,6 +19,8 @@ AgentBase is an MCP server, Codex plugin, and macOS inspector for persistent pro
 
 AgentBase does not call a model or send project data to a hosted service. The MCP server and project store run locally.
 
+Use the `mcp_status` tool to check server and storage readiness. For a sandboxed analysis check, run `agentbase doctor`.
+
 ## Quick start
 
 Requires Node.js 22.22 or newer and Codex or Claude Code.
@@ -36,7 +38,7 @@ Start a fresh Codex session to load the plugin. In the macOS inspector, open Con
 
 AgentBase is open source under the Apache-2.0 license, and contributions are welcome. Open an issue to report a bug or discuss an idea; pull requests for code, docs, tests, and design are welcome too.
 
-To get started, install Node.js 22.22+, run `npm ci`, make a focused change, and run `npm test`. For inspector changes on macOS, run `npm run test:ui` as well. Please describe the problem your change solves and what you checked.
+To get started, install Node.js 22.22+, run `npm ci`, make a focused change, and run `npm test`. Run `npm run test:mcp` for the real stdio compatibility check. For inspector changes on macOS, run `npm run test:ui` as well. Please describe the problem your change solves and what you checked.
 
 ## License
 

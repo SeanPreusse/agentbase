@@ -26,6 +26,7 @@
     "build": "tsc",
     "check": "tsc --noEmit",
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.mjs",
+    "test:mcp": "npm run build && node --test --test-concurrency=1 test/mcp.test.mjs",
     "start": "node bin/agentbase.mjs serve",
     "demo": "npm run build && node examples/demo.mjs",
     "test:package": "npm run build && node scripts/smoke-package.mjs",
