@@ -12,18 +12,28 @@ struct WorkspaceViewToggle: View {
 }
 struct KanbanColumn: Identifiable {
     let id: String; let title: String
-    static let all = [KanbanColumn(id:"proposed",title:"Backlog"),KanbanColumn(id:"ready",title:"Ready"),KanbanColumn(id:"in_progress",title:"In progress"),KanbanColumn(id:"review",title:"Review"),KanbanColumn(id:"blocked",title:"Blocked"),KanbanColumn(id:"done",title:"Done"),KanbanColumn(id:"cancelled",title:"Cancelled")]
-    static func visible(for tasks: [Entry], includingClosed: Bool = true) -> [KanbanColumn] {
-        all.filter { column in
-            if !includingClosed && ["done","cancelled"].contains(column.id) { return false }
-            return ["proposed","ready","in_progress","done"].contains(column.id) || tasks.contains(where: {task in task.text("status") == column.id})
-        }
+    static let queue = KanbanColumn(id:"queue",title:"Queue")
+    static let active = KanbanColumn(id:"active",title:"Active")
+    static let attention = KanbanColumn(id:"attention",title:"Needs attention")
+    static let done = KanbanColumn(id:"done",title:"Done")
+    static func placement(for task: Entry) -> String {
+        let status = task.text("status")
+        if ["done","cancelled"].contains(status) {return "done"}
+        let waiting = (task.dependencies ?? []).contains(where: {$0["status"]?.text != "done"})
+        let expired = !task.text("owner").isEmpty && task.lease_active == false && ["in_progress","review"].contains(status)
+        if status == "blocked" || status == "review" || waiting || expired {return "attention"}
+        return status == "in_progress" ? "active" : "queue"
     }
 }
 struct KanbanWorkspace: View {
     @ObservedObject var model: Inspector
     var tasks: [Entry] { model.filteredBoardTasks }
-    var columns: [KanbanColumn] { KanbanColumn.visible(for:model.kanbanTasks,includingClosed:model.boardFilter == "All tasks") }
+    var columns: [KanbanColumn] {
+        if model.boardFilter == "Done" {return [.done]}
+        if model.boardFilter == "Needs attention" {return [.attention]}
+        if model.boardFilter == "All" {return [.queue,.active,.attention,.done]}
+        return [.queue,.active,.attention]
+    }
     var body: some View {
         GeometryReader { geometry in
             let width = max(CGFloat(240),min(CGFloat(320),(geometry.size.width-36-CGFloat(columns.count-1)*14)/CGFloat(columns.count)))
@@ -40,7 +50,7 @@ struct KanbanWorkspace: View {
                     RecentChangesButton(model:model)
                     ConnectionsButton(model:model.connections)
                     Spacer()
-                    Picker("Task filter",selection:$model.boardFilter) {ForEach(["Open","Needs attention"],id:\.self){Text($0).tag($0)}}.labelsHidden().frame(width:135)
+                    Picker("Task view",selection:$model.boardFilter) {ForEach(["All","Open","Needs attention","Done"],id:\.self){Text($0).tag($0)}}.labelsHidden().frame(width:150)
                     TextField("Search tasks",text:$model.boardQuery).textFieldStyle(.roundedBorder).frame(width:200)
                     Menu {
                         Button("Toggle full screen") {NSApp.keyWindow?.toggleFullScreen(nil)}
@@ -73,12 +83,12 @@ struct KanbanWorkspace: View {
                     if model.canLoadMoreTasks {Button("Load 200 more",action:model.loadMoreTasks).disabled(model.paused).help(model.paused ? "Resume updates to load more tasks" : "Load older saved tasks (up to 1,000)")}
                     else if (model.snapshot?.counts["task"] ?? 0)>model.kanbanTasks.count {Text("· 1,000-task display limit")}
                     Spacer()
-                }.font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary).padding(.horizontal,18).padding(.bottom,12)
+                }.font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary).padding(.leading,62).padding(.trailing,18).padding(.bottom,12)
             }
         }.background(Color(red:0.045,green:0.055,blue:0.065))
     }
     func columnView(_ column: KanbanColumn,width:CGFloat,height:CGFloat) -> some View {
-        let cards=tasks.filter{$0.text("status")==column.id}
+        let cards=tasks.filter{KanbanColumn.placement(for:$0)==column.id}
         return VStack(alignment:.leading,spacing:12) {
             HStack(spacing:8) {
                 Circle().fill(statusColor(column.id)).frame(width:6,height:6)
@@ -88,7 +98,7 @@ struct KanbanWorkspace: View {
             }.padding(.horizontal,4)
             ScrollView {LazyVStack(spacing:10) {
                 ForEach(cards) {task in card(task)}
-                if cards.isEmpty {Text(model.boardQuery.isEmpty && model.boardFilter == "All tasks" ? "No tasks" : "No matches").font(.caption).foregroundStyle(.tertiary).frame(maxWidth:.infinity,alignment:.leading).padding(14)}
+                if cards.isEmpty {Text(model.boardQuery.isEmpty && ["Open","All"].contains(model.boardFilter) ? "No tasks" : "No matches").font(.caption).foregroundStyle(.tertiary).frame(maxWidth:.infinity,alignment:.leading).padding(14)}
             }.padding(.bottom,12)}
         }.padding(12).frame(width:width,height:height,alignment:.topLeading)
          .background(Color.white.opacity(0.025),in:RoundedRectangle(cornerRadius:10))
@@ -97,15 +107,31 @@ struct KanbanWorkspace: View {
         Button {model.openRecord(task.id,kind:"task")} label:{
             VStack(alignment:.leading,spacing:10) {
                 if model.isAllProjects {Text(model.projectName(for:task.project_id)).font(.caption2.weight(.semibold)).foregroundStyle(accent)}
+                if !task.text("parent_task_id").isEmpty {
+                    Label("Subtask of \(parentTitle(for:task))",systemImage:"arrow.turn.down.right")
+                        .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+                }
                 Text(task.title).font(.system(size:13,weight:.medium)).foregroundStyle(.primary).multilineTextAlignment(.leading)
+                if !task.text("status").isEmpty {StatusBadge(value:task.text("status"))}
                 let completion = (task.body["completion"]?.raw as? [String:Any])?["summary"] as? String ?? ""
                 let progress = task.text("status") == "done" && !completion.isEmpty ? completion : (task.text("progress").isEmpty ? task.text("description") : task.text("progress"))
                 if !progress.isEmpty {Text(progress).font(.caption).foregroundStyle(.secondary).lineLimit(3).multilineTextAlignment(.leading)}
+                if task.text("status") == "blocked" {
+                    let reason = task.text("reason").isEmpty ? task.text("blocked_reason") : task.text("reason")
+                    Label(reason.isEmpty ? "Waiting for input" : reason,systemImage:"pause.circle")
+                        .font(.caption2).foregroundStyle(.orange).lineLimit(3).multilineTextAlignment(.leading)
+                }
                 let blockers=(task.dependencies ?? []).filter{$0["status"]?.text != "done"}
                 if !blockers.isEmpty {Label("Waiting for \(blockers.count) task\(blockers.count==1 ? "" : "s")",systemImage:"link").font(.caption2).foregroundStyle(.orange).help(blockers.compactMap{$0["title"]?.text}.joined(separator:", "))}
                 if !task.text("owner").isEmpty {HStack {Text(task.text("owner")).lineLimit(1).truncationMode(.middle);Spacer();if task.lease_active != true && ["in_progress","review"].contains(task.text("status")) {Text("Lease expired").foregroundStyle(.orange)}}.font(.system(size:9,design:.monospaced)).foregroundStyle(.secondary)}
             }.padding(14).frame(maxWidth:.infinity,alignment:.leading).background(Color.white.opacity(model.selectedID==task.id ? 0.09 : 0.045),in:RoundedRectangle(cornerRadius:8)).overlay(RoundedRectangle(cornerRadius:8).stroke(model.selectedID==task.id ? accent.opacity(0.5) : Color.white.opacity(0.04),lineWidth:1)).contentShape(Rectangle())
         }.buttonStyle(.plain).contextMenu {Button("Show in graph") {model.showInGraph(task.id)}}
+    }
+    func parentTitle(for task: Entry) -> String {
+        let id=task.text("parent_task_id")
+        return model.snapshot?.records.first(where:{$0.id==id})?.title
+            ?? model.snapshot?.graph?.nodes.first(where:{$0.id==id})?.title
+            ?? "parent task"
     }
 }
 

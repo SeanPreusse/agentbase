@@ -3,8 +3,8 @@
   "mcpServers": {
     "agentbase": {
       "type": "stdio",
-      "command": "node",
-      "args": ["${PLUGIN_ROOT}/bin/agentbase.mjs", "serve"],
+      "command": "./bin/agentbase-launch.sh",
+      "args": [],
       "cwd": "${PLUGIN_ROOT}"
     }
   }

@@ -26,14 +26,16 @@ const skill = (extra = {}) => ({ title: 'Spreadsheet import', description: 'Anal
 
 test('skill catalog creates, searches, revises with versions, and filters disabled entries', async t => {
   const f = await fixture(t);
-  const created = await f.write('skill_save', skill());
+  const created = await f.write('skill_save', skill({ category: 'Data' }));
   assert.equal(created.kind, 'skill');
+  assert.equal(created.body.category, 'Data');
   const found = await f.call('skill_list', { query: 'SPREADSHEET' });
   assert.equal(found.total, 1);
   assert.equal(found.records[0].id, created.id);
 
-  const updated = await f.write('skill_save', skill({ id: created.id, expected_version: created.version, status: 'disabled' }));
+  const updated = await f.write('skill_save', skill({ id: created.id, expected_version: created.version, category: 'Data', status: 'disabled' }));
   assert.equal(updated.version, 2);
+  assert.equal(updated.body.category, 'Data');
   await assert.rejects(f.write('skill_save', skill({ id: created.id, expected_version: created.version })), /changed/);
   assert.equal((await f.call('skill_list')).total, 0);
   assert.equal((await f.call('skill_list', { status: 'all' })).total, 1);

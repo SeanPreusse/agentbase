@@ -27,6 +27,166 @@ async function fixture(t, options = {}) {
 }
 const taskInput = { title: 'Fix import', description: 'Prevent duplicate imports.', acceptance: ['Repeated import creates no duplicate rows.'] };
 
+test('task sources validate references, join task context, and stay distinct from dependencies', async t => {
+  const f = await fixture(t);
+  const skill = await f.write('skill_save', {title:'Review schemas',description:'Check interface boundaries.',source:'file:///skills/review/SKILL.md',triggers:['review schema']});
+  const dependency = await f.write('task_create',{title:'Agree schema',description:'Set the input shape.',acceptance:['Schema agreed.'],requires_evidence:false});
+  const task = await f.write('task_create',{
+    title:'Implement source links',description:'Reference useful context.',acceptance:['Sources are visible.'],dependencies:[dependency.id],
+    sources:[
+      {kind:'record',reference:skill.id,note:'Used for review guidance.'},
+      {kind:'web',reference:'https://example.com/spec',title:'Protocol specification'},
+      {kind:'document',reference:'/docs/interface.md'},
+      {kind:'file',reference:'/data/sample.json',title:'Sample input'},
+    ],requires_evidence:false,
+  });
+  assert.equal(task.body.sources.length,4);
+  const detail = await f.call('record_get',{id:task.id});
+  assert.ok(detail.dependencies.includes(dependency.id));
+  assert.ok(!task.body.sources.some(source=>source.reference===dependency.id));
+
+  const graph = await f.call('graph_get',{view:'content'});
+  assert.ok(graph.edges.some(edge=>edge.source===task.id && edge.target===skill.id && edge.relation==='source'));
+  const neighborhood = await f.call('graph_get',{focus_id:skill.id,depth:1});
+  assert.ok(neighborhood.nodes.some(node=>node.id===task.id));
+  assert.ok(detail.related_ids.includes(skill.id));
+
+  const updated = await f.write('task_update',{id:task.id,expected_version:task.version,sources:[{kind:'record',reference:skill.id,title:'Applied skill'}]});
+  assert.equal(updated.body.sources.length,1);
+  await assert.rejects(f.write('task_update',{id:task.id,expected_version:updated.version,sources:[{kind:'record',reference:'skill_missing'}]}),{code:'NOT_FOUND'});
+  const otherRoot=join(f.directory,'other-source-project'); await mkdir(otherRoot);
+  const other=await f.service.call('project_open',{root:otherRoot});
+  await assert.rejects(f.service.call('task_create',{project_id:other.id,actor:'codex-a',request_id:randomUUID(),...taskInput,
+    sources:[{kind:'record',reference:skill.id}]}),{code:'NOT_FOUND'});
+
+  const dependencyClaim=await f.write('task_claim',{id:dependency.id,expected_version:dependency.version});
+  await f.write('task_complete',{id:dependency.id,expected_version:dependencyClaim.version,summary:'Schema agreed.'});
+  const claimed=await f.write('task_claim',{id:updated.id,expected_version:updated.version});
+  const completed=await f.write('task_complete',{id:updated.id,expected_version:claimed.version,summary:'Sources are retained.',evidence:[{kind:'manual',reference:'task detail review',outcome:'Legacy completion evidence remains available.'}]});
+  assert.equal(completed.body.completion.evidence[0].reference,'task detail review');
+  assert.equal(completed.body.sources[0].reference,skill.id);
+});
+
+test('task hierarchy stays project-scoped, navigable, and complete from leaves upward', async t => {
+  const f = await fixture(t);
+  const parent = await f.write('task_create', {title:'Ship importer',description:'Deliver the import workflow.',acceptance:['Import works.'],requires_evidence:false});
+  const child = await f.write('task_create', {title:'Validate rows',description:'Check imported rows.',acceptance:['Rows validated.'],parent_task_id:parent.id,requires_evidence:false});
+  let grandchild = await f.write('task_create', {title:'Check duplicates',description:'Find duplicate rows.',acceptance:['No duplicates.'],parent_task_id:child.id,requires_evidence:false});
+  const graph = await f.call('graph_get', {view:'content'});
+  assert.ok(graph.edges.some(edge => edge.source===parent.id && edge.target===child.id && edge.relation==='child'));
+  assert.ok(graph.edges.some(edge => edge.source===child.id && edge.target===grandchild.id && edge.relation==='child'));
+  const neighborhood = await f.call('graph_get',{focus_id:child.id,depth:1});
+  assert.ok(neighborhood.nodes.some(node=>node.id===parent.id) && neighborhood.nodes.some(node=>node.id===grandchild.id));
+  assert.deepEqual((await f.call('task_list',{parent_task_id:parent.id})).records.map(task=>task.id),[child.id]);
+  const detail = await f.call('record_get',{id:child.id});
+  assert.equal(detail.parent_task.id,parent.id);
+  assert.deepEqual(detail.child_tasks.map(task=>task.id),[grandchild.id]);
+  const context = await f.call('context_get',{task_id:child.id});
+  assert.ok(context.included_ids.includes(parent.id));
+  const resumed = await f.service.call('project_resume',{root:f.root,query:'validate importer rows'});
+  assert.equal(resumed.open_tasks.find(task=>task.id===child.id).parent_task_title,'Ship importer');
+  assert.equal(resumed.open_tasks.find(task=>task.id===child.id).open_child_count,1);
+  assert.deepEqual(resumed.open_tasks.find(task=>task.id===parent.id).open_children,
+    [{id:child.id,title:'Validate rows',status:'ready'}]);
+  assert.equal(resumed.open_tasks.find(task=>task.id===parent.id).open_children_truncated,false);
+  assert.deepEqual(resumed.open_tasks.find(task=>task.id===grandchild.id).open_children,[]);
+  const detached = await f.write('task_update',{id:grandchild.id,expected_version:grandchild.version,parent_task_id:null});
+  assert.equal(detached.body.parent_task_id,null);
+  grandchild = await f.write('task_update',{id:grandchild.id,expected_version:detached.version,parent_task_id:child.id});
+  await assert.rejects(f.write('task_update',{id:parent.id,expected_version:parent.version,parent_task_id:grandchild.id}),{code:'TASK_PARENT_CYCLE'});
+  await assert.rejects(f.write('task_update',{id:parent.id,expected_version:parent.version,status:'cancelled',reason:'Cancel work.'}),{code:'CHILD_TASKS_OPEN'});
+  const otherRoot = join(f.directory,'other-hierarchy'); await mkdir(otherRoot);
+  const other = await f.service.call('project_open',{root:otherRoot});
+  await assert.rejects(f.service.call('task_create',{project_id:other.id,actor:'codex-a',request_id:randomUUID(),title:'Wrong project',description:'Cross-project child.',acceptance:['Rejected.'],parent_task_id:parent.id}),{code:'NOT_FOUND'});
+  const claimedParent = await f.write('task_claim',{id:parent.id,expected_version:parent.version});
+  await assert.rejects(f.write('task_complete',{id:parent.id,expected_version:claimedParent.version,summary:'Too soon.'}),{code:'CHILD_TASKS_OPEN'});
+  for (const task of [grandchild,child]) {
+    const claimed = await f.write('task_claim',{id:task.id,expected_version:task.version});
+    await f.write('task_complete',{id:task.id,expected_version:claimed.version,summary:'Verified.'});
+  }
+  await f.write('task_complete',{id:parent.id,expected_version:claimedParent.version,summary:'All subtasks done.'});
+  await assert.rejects(f.write('task_create',{title:'Late subtask',description:'Would reopen completed work.',acceptance:['Rejected.'],parent_task_id:parent.id}),{code:'TASK_PARENT_CLOSED'});
+});
+
+test('resume bounds the child preview and signals when more subtasks exist', async t => {
+  const f = await fixture(t);
+  const parent = await f.write('task_create', {title:'Import pipeline',description:'Implement importing.',acceptance:['Import works.']});
+  const children = [];
+  for (let index=0; index<6; index++) children.push(await f.write('task_create', {
+    title:`Import stage ${index}`,description:'Implement one stage.',acceptance:['Stage works.'],parent_task_id:parent.id,
+  }));
+  const resumed = await f.service.call('project_resume',{root:f.root,query:'import pipeline'});
+  const candidate = resumed.open_tasks.find(task=>task.id===parent.id);
+  assert.equal(candidate.open_child_count,6);
+  assert.deepEqual(candidate.open_children.map(task=>task.id),children.slice(0,5).map(task=>task.id));
+  assert.equal(candidate.open_children_truncated,true);
+});
+
+test('project resume ranks compact open task candidates without crossing projects', async t => {
+  const f = await fixture(t);
+  const match = await f.write('task_create', { title: 'Optimize AI plugin flow', description: 'Reduce project resume calls.', acceptance: ['Resume finds this task.'] });
+  let blocked;
+  for (let index = 0; index < 13; index++) {
+    const task = await f.write('task_create', {
+    title: `Unrelated release step ${index}`, description: 'Prepare packaging.', acceptance: ['Package is ready.'], priority: 1,
+    });
+    if (index === 0) blocked = task;
+  }
+  blocked = await f.write('task_update', { id: blocked.id, expected_version: blocked.version, status: 'blocked', reason: 'Need the signing team ID from the user.' });
+  const resumed = await f.service.call('project_resume', { root: f.root, query: 'optimize AI plugin flow' });
+  assert.equal(resumed.open_task_count, 14);
+  assert.equal(resumed.open_task_status_counts.blocked, 1);
+  assert.equal(resumed.open_task_status_counts.ready, 13);
+  assert.equal(resumed.open_tasks.length, 12);
+  assert.equal(resumed.open_tasks_truncated, true);
+  assert.equal(resumed.open_tasks_scanned, 14);
+  assert.equal(resumed.open_tasks[0].id, match.id);
+  assert.ok(resumed.open_tasks[0].keyword_score > 0);
+  assert.ok(resumed.open_tasks.every(task => task.version > 0 && !('description' in task)));
+  assert.equal(resumed.open_tasks.find(task => task.id === blocked.id)?.blocked_reason, 'Need the signing team ID from the user.');
+  assert.equal(resumed.blocked_tasks[0].id, blocked.id);
+  assert.equal(resumed.blocked_tasks_truncated, false);
+  assert.ok(!(await f.call('task_list', { ready_only: true })).records.some(task => task.id === blocked.id));
+  await assert.rejects(f.write('task_claim', { id: blocked.id, expected_version: blocked.version }), { code: 'TASK_NOT_READY' });
+  const otherRoot = join(f.directory, 'other-project'); await mkdir(otherRoot);
+  const other = await f.service.call('project_resume', { root: otherRoot, query: 'optimize AI plugin flow' });
+  assert.equal(other.open_task_count, 0);
+  assert.deepEqual(other.open_tasks, []);
+  assert.deepEqual(other.blocked_tasks, []);
+});
+
+test('resume retrieves an older matching task beyond the recent window', async t => {
+  const f = await fixture(t);
+  const older = await f.write('task_create', {
+    title:'Recover historic importer',description:'Repair a long-standing import failure.',acceptance:['Imports work.'],
+  });
+  for (let index=0; index<205; index++) await f.write('task_create', {
+    title:`Unrelated release step ${index}`,description:'Prepare packaging.',acceptance:['Package is ready.'],
+  });
+  const resumed = await f.service.call('project_resume',{root:f.root,query:'historic importer'});
+  assert.equal(resumed.open_task_count,206);
+  assert.equal(resumed.open_tasks[0].id,older.id);
+  assert.ok(resumed.open_tasks_scanned>200);
+  assert.equal(resumed.open_task_search_truncated,false);
+  const broad = await f.service.call('project_resume',{root:f.root,query:'unrelated release'});
+  assert.equal(broad.open_task_search_truncated,true);
+});
+
+test('resume keeps older blocked work visible when matching tasks fill the candidate list', async t => {
+  const f = await fixture(t);
+  let blocked = await f.write('task_create', {title:'Provide signing information',description:'Wait for user.',acceptance:['Information supplied.']});
+  blocked = await f.write('task_update', {id:blocked.id,expected_version:blocked.version,status:'blocked',reason:'Need the Apple team ID.'});
+  for (let index=0;index<20;index++) await f.write('task_create', {
+    title:`Optimize plugin step ${index}`,description:'Improve flow.',acceptance:['Flow works.'],priority:0,
+  });
+  const resumed = await f.service.call('project_resume', {root:f.root,query:'optimize plugin flow'});
+  assert.equal(resumed.open_task_count,21);
+  assert.equal(resumed.open_task_status_counts.blocked,1);
+  assert.ok(!resumed.open_tasks.some(task=>task.id===blocked.id));
+  assert.deepEqual(resumed.blocked_tasks.map(task=>task.id),[blocked.id]);
+  assert.equal(resumed.blocked_tasks[0].blocked_reason,'Need the Apple team ID.');
+});
+
 test('concurrent cold startup handles SQLite initialization contention', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'agentbase-cold-start-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

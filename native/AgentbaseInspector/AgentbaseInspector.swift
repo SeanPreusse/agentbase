@@ -1,6 +1,10 @@
 import SwiftUI
 import AppKit
 
+func bundledPath(_ path: String) -> String {
+    path.hasPrefix("/") ? path : (Bundle.main.resourceURL?.appendingPathComponent(path).path ?? path)
+}
+
 struct JSONValue: Decodable {
     let raw: Any
     init(from decoder: Decoder) throws {
@@ -63,7 +67,7 @@ struct Snapshot: Decodable {
     @Published var graphQuery = ""
     private var graphSearchTask: Task<Void,Never>?
     @Published var boardQuery = ""
-    @Published var boardFilter = "All tasks"
+    @Published var boardFilter = "All"
     @Published var history: [String] = []
     @Published var historyIndex = -1
     @Published var graphFocusID: String?
@@ -72,6 +76,7 @@ struct Snapshot: Decodable {
     private var launchRoot: String?
     private let preferences: UserDefaults
     private var process: Process?
+    private var readerTask: Task<Void, Never>?
     private var generation = UUID()
     private var buffer = Data()
     private var reconnectTask: Task<Void, Never>?
@@ -85,6 +90,7 @@ struct Snapshot: Decodable {
         if let i = args.firstIndex(of:"--root"), args.count > i+1 { launchRoot = args[i+1] }
         else {launchRoot = environment["AGENTBASE_ROOT"]}
         projectID = launchRoot == nil ? Self.allProjectsID : nil
+        connections.setWorkspace(launchRoot)
     }
     func start() {
         stop(); paused = false; reconnecting = false
@@ -94,7 +100,7 @@ struct Snapshot: Decodable {
               let config = try? JSONSerialization.jsonObject(with: data) as? [String: String],
               let node = config["node"] else { failure = "Runtime configuration missing. Rebuild with npm run ui:build."; return }
         let child = Process(); let output = Pipe(); let errors = Pipe()
-        child.executableURL = URL(fileURLWithPath: node)
+        child.executableURL = URL(fileURLWithPath: bundledPath(node))
         child.arguments = [resources.appendingPathComponent("bridge/inspector-main.js").path, "--watch", "--home", home] + (projectID.map { ["--project", $0] } ?? []) + (selectedID.map { ["--record", $0] } ?? [])
         child.arguments! += ["--task-limit", String(taskLimit)]
         if let launchRoot {child.arguments! += ["--root",launchRoot]}
@@ -102,29 +108,39 @@ struct Snapshot: Decodable {
         if includeBackground { child.arguments! += ["--include-background"] }
         child.standardOutput = output; child.standardError = errors
         errors.fileHandleForReading.readabilityHandler = { handle in _ = handle.availableData }
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let chunk = handle.availableData
-            Task { @MainActor in
-                guard let self, self.generation == token, !chunk.isEmpty else { return }
-                self.buffer.append(chunk)
-                if self.buffer.count > 64 * 1024 * 1024 { self.readerFailed("Snapshot exceeded the inspector limit."); return }
-                while let end = self.buffer.firstIndex(of: 10) {
-                    let line = self.buffer.subdata(in: 0..<end); self.buffer.removeSubrange(0...end)
-                    do {
-                        let value = try JSONDecoder().decode(Snapshot.self, from: line)
-                        let mustPin = self.projectID == nil && value.selected_project_id != nil
-                        self.accept(value)
-                        if mustPin { self.start(); return }
-                    } catch { self.readerFailed("Could not read local state: \(error.localizedDescription)"); return }
+        child.terminationHandler = { [weak self] child in
+            errors.fileHandleForReading.readabilityHandler = nil
+            let status = child.terminationStatus
+            Task { @MainActor [weak self] in guard let self, self.generation == token else { return }; self.readerFailed("Local reader stopped (\(status)).") }
+        }
+        do {
+            try child.run(); process = child
+            readerTask = Task.detached(priority:.utility) { [weak self] in
+                while !Task.isCancelled {
+                    let chunk = output.fileHandleForReading.availableData
+                    if chunk.isEmpty { break }
+                    await self?.receive(chunk, token:token)
                 }
             }
         }
-        child.terminationHandler = { [weak self] child in
-            output.fileHandleForReading.readabilityHandler = nil; errors.fileHandleForReading.readabilityHandler = nil
-            Task { @MainActor in guard let self, self.generation == token else { return }; self.readerFailed("Local reader stopped (\(child.terminationStatus)).") }
+        catch { errors.fileHandleForReading.readabilityHandler = nil; readerFailed("Could not start Node. Rebuild if the Node installation moved.") }
+    }
+    func receive(_ chunk: Data, token: UUID) {
+        guard generation == token, !chunk.isEmpty else { return }
+        consume(chunk)
+    }
+    func consume(_ chunk: Data) {
+        buffer.append(chunk)
+        if buffer.count > 64 * 1024 * 1024 { readerFailed("Snapshot exceeded the inspector limit."); return }
+        while let end = buffer.firstIndex(of: 10) {
+            let line = buffer.subdata(in: 0..<end); buffer.removeSubrange(0...end)
+            do {
+                let value = try JSONDecoder().decode(Snapshot.self, from: line)
+                let mustPin = projectID == nil && value.selected_project_id != nil
+                accept(value)
+                if mustPin { start(); return }
+            } catch { readerFailed("Could not read local state: \(error.localizedDescription)"); return }
         }
-        do { try child.run(); process = child }
-        catch { output.fileHandleForReading.readabilityHandler = nil; errors.fileHandleForReading.readabilityHandler = nil; readerFailed("Could not start Node. Rebuild if the Node installation moved.") }
     }
     func accept(_ value: Snapshot) {
         projects = value.projects
@@ -134,6 +150,7 @@ struct Snapshot: Decodable {
         }
         snapshot = value; receivedAt = Date(); failure = nil; retryAttempt = 0; reconnecting = false
         if projectID == nil { projectID = value.selected_project_id }
+        connections.setWorkspace(projectID == Self.allProjectsID ? nil : (value.working_root ?? value.projects.first(where:{$0.id == projectID})?.root))
         preferences.set(home, forKey: "store")
         var saved = preferences.dictionary(forKey: "projects") ?? [:]
         if let projectID { saved[home] = projectID }; preferences.set(saved, forKey: "projects")
@@ -148,7 +165,7 @@ struct Snapshot: Decodable {
             guard let self, !Task.isCancelled, !self.paused else { return }; self.start()
         }
     }
-    func stop() { graphSearchTask?.cancel(); graphSearchTask = nil; generation = UUID(); reconnectTask?.cancel(); reconnectTask = nil; process?.terminate(); process = nil; buffer = Data(); reconnecting = false }
+    func stop() { graphSearchTask?.cancel(); graphSearchTask = nil; generation = UUID(); reconnectTask?.cancel(); reconnectTask = nil; readerTask?.cancel(); readerTask = nil; process?.terminate(); process = nil; buffer = Data(); reconnecting = false }
     func togglePause() { if paused { start() } else { stop(); paused = true } }
     func setViewMode(_ mode: String) { guard ["Graph","Kanban","Skills"].contains(mode) else {return}; viewMode = mode; preferences.set(mode,forKey:"viewMode"); selectedID = nil }
     var kanbanTasks: [Entry] {
@@ -158,10 +175,15 @@ struct Snapshot: Decodable {
             return pa != pb ? pa < pb : (a.updated_at != b.updated_at ? a.updated_at > b.updated_at : a.id < b.id)
         }
     }
+    var hasActiveWork: Bool {
+        !paused && failure == nil && !reconnecting && (snapshot?.records.contains {
+            $0.kind == "task" && $0.text("status") == "in_progress" && $0.lease_active == true
+        } ?? false)
+    }
     var canLoadMoreTasks: Bool { taskLimit < 1000 && (snapshot?.counts["task"] ?? 0) > kanbanTasks.count }
     func loadMoreTasks() { guard canLoadMoreTasks else {return}; taskLimit = min(1000,taskLimit+200); if !paused {start()} }
-    func resetNavigation() { graphSearchTask?.cancel(); graphQuery = ""; taskLimit = 200; history = []; historyIndex = -1; graphFocusID = nil; graphFocusPreservesZoom = false; boardQuery = ""; boardFilter = "All tasks" }
-    func selectProject(_ id: String) { launchRoot = nil; resetNavigation(); projectID = id; selectedID = nil; snapshot = nil; query = ""; start() }
+    func resetNavigation() { graphSearchTask?.cancel(); graphQuery = ""; taskLimit = 200; history = []; historyIndex = -1; graphFocusID = nil; graphFocusPreservesZoom = false; boardQuery = ""; boardFilter = "All" }
+    func selectProject(_ id: String) { launchRoot = nil; resetNavigation(); projectID = id; connections.setWorkspace(id == Self.allProjectsID ? nil : projects.first(where:{$0.id == id})?.root); selectedID = nil; snapshot = nil; query = ""; start() }
     func openRecord(_ id: String, kind: String? = nil) {
         if historyIndex < 0 || history[historyIndex] != id {
             history = Array(history.prefix(historyIndex+1)); history.append(id)
@@ -179,9 +201,14 @@ struct Snapshot: Decodable {
     func goBack() { guard canGoBack else {return}; historyIndex -= 1; selectRecord(history[historyIndex]); if viewMode == "Graph" {graphFocusPreservesZoom = false;graphFocusID = selectedID; graphFocusRequest = UUID()} }
     func goForward() { guard canGoForward else {return}; historyIndex += 1; selectRecord(history[historyIndex]); if viewMode == "Graph" {graphFocusPreservesZoom = false;graphFocusID = selectedID; graphFocusRequest = UUID()} }
     func showInGraph(_ id: String) { graphFocusPreservesZoom = false;graphQuery = ""; setViewMode("Graph"); openRecord(id); graphFocusID = id; graphFocusRequest = UUID() }
-    func showOnBoard(_ id: String) { setViewMode("Kanban"); clearBoardFilters(); openRecord(id,kind:"task") }
-    var boardHasFilters: Bool { boardFilter != "All tasks" || !boardQuery.isEmpty }
-    func clearBoardFilters() { boardFilter = "All tasks"; boardQuery = "" }
+    func showOnBoard(_ id: String) {
+        setViewMode("Kanban"); boardQuery = ""
+        let status = snapshot?.records.first(where:{$0.id == id})?.text("status") ?? ""
+        boardFilter = ["done","cancelled"].contains(status) ? "Done" : "All"
+        openRecord(id,kind:"task")
+    }
+    var boardHasFilters: Bool { boardFilter != "All" || !boardQuery.isEmpty }
+    func clearBoardFilters() { boardFilter = "All"; boardQuery = "" }
     var boardEmptyExplanation: String? {
         guard boardHasFilters && filteredBoardTasks.isEmpty else {return nil}
         if !boardQuery.isEmpty {return "No tasks match this search."}
@@ -191,6 +218,7 @@ struct Snapshot: Decodable {
             return "No open tasks recorded for this project."
         }
         if boardFilter == "Needs attention" {return "No loaded tasks need attention."}
+        if boardFilter == "Done" {return "No completed or cancelled tasks in the loaded records."}
         return "No tasks match the current filters."
     }
     var filteredBoardTasks: [Entry] {
@@ -198,7 +226,7 @@ struct Snapshot: Decodable {
             let status = task.text("status"), closed = ["done","cancelled"].contains(status)
             let waiting = (task.dependencies ?? []).contains{$0["status"]?.text != "done"}
             let expired = !task.text("owner").isEmpty && task.lease_active != true && ["in_progress","review"].contains(status)
-            let matches = boardFilter == "All tasks" || (boardFilter == "Open" && !closed) || (boardFilter == "Needs attention" && !closed && (status == "blocked" || waiting || expired))
+            let matches = boardFilter == "All" || (boardFilter == "Done" && closed) || (boardFilter == "Open" && !closed) || (boardFilter == "Needs attention" && !closed && (status == "blocked" || status == "review" || waiting || expired))
             return matches && (boardQuery.isEmpty || (task.title + " " + task.text("description") + " " + task.text("owner")).localizedCaseInsensitiveContains(boardQuery))
         }
     }
@@ -223,7 +251,7 @@ struct Snapshot: Decodable {
     func focusChanged() { if !paused { start() } }
     func chooseStore() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.prompt = "Inspect store"
-        if panel.runModal() == .OK, let url = panel.url { launchRoot = nil; resetNavigation(); home = url.path; projectID = preferences.dictionary(forKey: "projects")?[home] as? String; selectedID = nil; snapshot = nil; projects = []; start() }
+        if panel.runModal() == .OK, let url = panel.url { launchRoot = nil; resetNavigation(); home = url.path; projectID = preferences.dictionary(forKey: "projects")?[home] as? String; connections.setWorkspace(nil); selectedID = nil; snapshot = nil; projects = []; start() }
     }
     func matchesTask(_ entry: Entry) -> Bool {
         let status = entry.text("status")
@@ -270,6 +298,18 @@ func shortTime(_ value: String) -> String {
 func statusColor(_ status: String) -> Color {
     switch status { case "done": return .green; case "in_progress", "review": return accent; case "blocked": return .orange; case "cancelled": return .secondary; default: return .blue }
 }
+struct MarkdownText: View {
+    let markdown: String
+    var font: Font = .body
+
+    private var attributedText: AttributedString {
+        (try? AttributedString(markdown: markdown, options: .init(interpretedSyntax: .full))) ?? AttributedString(markdown)
+    }
+
+    var body: some View {
+        Text(attributedText).font(font).textSelection(.enabled).fixedSize(horizontal: false, vertical: true).lineSpacing(1)
+    }
+}
 func timeLabel(_ value: String) -> String {
     let format = ISO8601DateFormatter(); format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     guard let date = format.date(from: value) else { return value }
@@ -278,6 +318,85 @@ func timeLabel(_ value: String) -> String {
 struct StatusBadge: View {
     let value: String
     var body: some View { Text(value.replacingOccurrences(of: "_", with: " ")).font(.caption.weight(.medium)).foregroundStyle(statusColor(value)).padding(.horizontal, 8).padding(.vertical, 4).background(statusColor(value).opacity(0.12), in: Capsule()) }
+}
+struct AgentBaseCornerLogo: View {
+    private static let image = NSImage(contentsOfFile: bundledPath("AgentBaseLogo.png"))
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let isWorking: Bool
+    var body: some View {
+        if let image = Self.image {
+            Image(nsImage:image).resizable().interpolation(.high).frame(width:40,height:40)
+                .overlay {
+                    if isWorking {
+                        if reduceMotion { climber(progress:0.55) }
+                        else {
+                            TimelineView(.animation(minimumInterval:1.0/15.0)) { timeline in
+                                climber(progress:timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy:3.2)/3.2)
+                            }
+                        }
+                    }
+                }
+                .accessibilityLabel(isWorking ? "AgentBase, task in progress" : "AgentBase logo")
+        }
+    }
+    private func climber(progress: Double) -> some View {
+        Canvas { context,size in
+            let scale = size.width/40
+            let step = sin(progress * .pi * 10) * 0.8 * scale
+            let x = (11.5 + progress * 7.5) * scale
+            let y = (26.5 - progress * 12) * scale
+            let head = CGRect(x:x-1.25*scale,y:y-5.5*scale,width:2.5*scale,height:2.5*scale)
+            let ink = Color(red:0.035,green:0.12,blue:0.17)
+            let fade = min(1,progress*12,(1-progress)*12)
+            context.opacity = fade
+            context.fill(Path(ellipseIn:head),with:.color(ink))
+            var limbs = Path()
+            limbs.move(to:CGPoint(x:x,y:y-2.8*scale)); limbs.addLine(to:CGPoint(x:x,y:y+1.3*scale))
+            limbs.move(to:CGPoint(x:x,y:y-1.7*scale)); limbs.addLine(to:CGPoint(x:x-2.2*scale,y:y-0.3*scale+step))
+            limbs.move(to:CGPoint(x:x,y:y-1.7*scale)); limbs.addLine(to:CGPoint(x:x+2.2*scale,y:y-2.8*scale-step))
+            limbs.move(to:CGPoint(x:x,y:y+1.3*scale)); limbs.addLine(to:CGPoint(x:x-1.8*scale,y:y+3.4*scale-step))
+            limbs.move(to:CGPoint(x:x,y:y+1.3*scale)); limbs.addLine(to:CGPoint(x:x+1.8*scale,y:y+3.2*scale+step))
+            context.stroke(limbs,with:.color(ink),style:StrokeStyle(lineWidth:1.15*scale,lineCap:.round,lineJoin:.round))
+        }
+    }
+}
+private struct OutsideClickMonitor: NSViewRepresentable {
+    let panelRect: CGRect
+    let onOutsideClick: () -> Void
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView()
+        view.panelRect = panelRect
+        view.onOutsideClick = onOutsideClick
+        return view
+    }
+
+    func updateNSView(_ view: MonitorView, context: Context) {
+        view.panelRect = panelRect
+        view.onOutsideClick = onOutsideClick
+    }
+
+    final class MonitorView: NSView {
+        var panelRect = CGRect.zero
+        var onOutsideClick: () -> Void = {}
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil, monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                guard let self, let window = self.window, event.window === window else { return event }
+                let point = self.convert(event.locationInWindow, from: nil)
+                let topLeadingPoint = CGPoint(x: point.x, y: self.bounds.height - point.y)
+                if !self.panelRect.contains(topLeadingPoint) { self.onOutsideClick() }
+                return event
+            }
+        }
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
+    }
 }
 struct InspectorView: View {
     @StateObject var model = Inspector()
@@ -288,7 +407,7 @@ struct InspectorView: View {
     private let panel = Color(red: 0.075, green: 0.09, blue: 0.105)
     var body: some View {
         GeometryReader { geometry in
-            let floatingSize=CGSize(width:model.selected?.kind == "analysis" ? min(560,geometry.size.width-36) : 360,height:max(240,min(650,geometry.size.height-100)))
+            let floatingSize=CGSize(width:model.selected?.kind == "analysis" ? min(560,geometry.size.width-36) : model.selected?.kind == "task" ? 400 : 360,height:max(240,min(650,geometry.size.height-100)))
             let panelSize=expandedDetails ? CGSize(width:geometry.size.width-36,height:geometry.size.height-68) : floatingSize
             let compact=DetailPanelPlacement.clamped(panelPosition ?? CGPoint(x:geometry.size.width-floatingSize.width-18,y:34),size:floatingSize,container:geometry.size)
             let location=expandedDetails ? CGPoint(x:18,y:34) : DetailPanelPlacement.clamped(CGPoint(x:compact.x+panelDrag.width,y:compact.y+panelDrag.height),size:floatingSize,container:geometry.size)
@@ -324,12 +443,18 @@ struct InspectorView: View {
                 if let failure = model.failure {
                     VStack { Spacer(); HStack { Image(systemName:"exclamationmark.triangle"); Text(failure + (model.reconnecting ? " Reconnecting…" : "")); Button("Retry") { model.start() } }.font(.caption).foregroundStyle(.orange).padding(12).background(.regularMaterial,in:RoundedRectangle(cornerRadius:10)).padding(.bottom,52) }.frame(maxWidth:.infinity)
                 }
-            }.background(canvas).preferredColorScheme(.dark).tint(accent)
+            }.background(canvas).overlay {
+                if model.selectedID != nil {
+                    OutsideClickMonitor(panelRect: CGRect(origin: location, size: panelSize)) { model.selectedID = nil }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity).allowsHitTesting(false)
+                }
+            }.preferredColorScheme(.dark).tint(accent)
+                .overlay(alignment:.bottomLeading) {AgentBaseCornerLogo(isWorking:model.hasActiveWork).padding(.leading,18).padding(.bottom,12).allowsHitTesting(false)}
         }.frame(minWidth:880,minHeight:600).ignoresSafeArea()
         .onChange(of:model.selectedID) { _,value in if value==nil {expandedDetails=false;panelDrag = .zero};model.focusChanged() }
         .onChange(of:model.projectID) {_,_ in panelPosition=nil;panelDrag = .zero;expandedDetails=false}
         .onChange(of:model.home) {_,_ in panelPosition=nil;panelDrag = .zero;expandedDetails=false}
-        .onAppear { model.start() }
+        .onAppear { model.start(); model.connections.startup() }
         .onReceive(NotificationCenter.default.publisher(for:NSApplication.willTerminateNotification)) { _ in model.stop() }
     }
     var detail: some View {
@@ -350,21 +475,58 @@ struct InspectorView: View {
                         }
                     }.textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading).padding(24)
                 } else if let entry = model.selected {
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text(entry.title).font(.title2.bold()).textSelection(.enabled)
-                        if model.isAllProjects {Button(model.projectName(for:entry.project_id)) {model.selectProject(entry.project_id)}.buttonStyle(.link)}
-                        HStack { if !entry.text("status").isEmpty { StatusBadge(value: entry.text("status")) } }
-                        Text("Updated \(timeLabel(entry.updated_at))").font(.caption).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: entry.kind == "task" ? 8 : 20) {
                         if entry.kind == "task" {
-                            detailText("Description", entry.text("description")); detailText("Owner", entry.text("owner"))
-                            TaskSkillRecommendations(model:model,task:entry)
-                            if !entry.text("lease_expires_at").isEmpty { detailText("Lease", "\(entry.lease_active == true ? "Active" : "Expired") · \(timeLabel(entry.text("lease_expires_at")))") }
-                            if !(entry.dependencies ?? []).isEmpty { VStack(alignment: .leading, spacing: 8) { Text("Dependencies").font(.headline); ForEach(Array((entry.dependencies ?? []).enumerated()), id: \.offset) { _, dep in HStack { Button(dep["title"]?.text ?? "Task") { if let id = dep["id"]?.text { model.openRecord(id, kind: "task") } }.buttonStyle(.link); Spacer(); StatusBadge(value: dep["status"]?.text ?? "unknown") } } } }
-                            detailText("Progress", entry.text("progress"))
-                            if let criteria = entry.body["acceptance"]?.raw as? [String] { VStack(alignment: .leading, spacing: 8) { Text("Acceptance criteria").font(.headline); ForEach(criteria, id: \.self) { Text("• " + $0).foregroundStyle(.secondary).textSelection(.enabled) } } }
+                            Text(entry.title).font(.system(size: 16, weight: .semibold)).foregroundStyle(.primary).textSelection(.enabled)
+                        } else {
+                            Text(entry.title).font(.title2.bold()).textSelection(.enabled)
+                        }
+                        if model.isAllProjects {Button(model.projectName(for:entry.project_id)) {model.selectProject(entry.project_id)}.buttonStyle(.link)}
+                        HStack(spacing:10) {
+                            if !entry.text("status").isEmpty { StatusBadge(value: entry.text("status")) }
+                            Spacer()
+                            Text("Updated \(timeLabel(entry.updated_at))").font(.caption).foregroundStyle(.secondary)
+                        }
+                        if entry.kind == "task" {
+                            if !entry.text("description").isEmpty {
+                                MarkdownText(markdown:entry.text("description"),font:.system(size:13)).foregroundStyle(.secondary)
+                            }
+                            taskDetailText("Owner", entry.text("owner"))
+                            if !entry.text("plan_id").isEmpty {
+                                let planID = entry.text("plan_id")
+                                let planTitle = model.snapshot?.records.first(where:{$0.id == planID})?.title ?? model.snapshot?.graph?.nodes.first(where:{$0.id == planID})?.title ?? planID
+                                Button("Plan: \(planTitle)") {model.openRecord(planID,kind:"plan")}.buttonStyle(.link)
+                            }
+                            if !entry.text("parent_task_id").isEmpty {
+                                let parentID = entry.text("parent_task_id")
+                                let parentTitle = model.snapshot?.records.first(where:{$0.id == parentID})?.title ?? model.snapshot?.graph?.nodes.first(where:{$0.id == parentID})?.title ?? parentID
+                                Button("Parent task: \(parentTitle)") {model.openRecord(parentID,kind:"task")}.buttonStyle(.link)
+                            }
+                            let children = (model.snapshot?.records ?? []).filter {$0.kind == "task" && $0.text("parent_task_id") == entry.id}
+                            if !children.isEmpty {
+                                VStack(alignment:.leading,spacing:6) {
+                                    Text("Subtasks").font(.system(size:13,weight:.semibold))
+                                    ForEach(children) { child in
+                                        HStack {Button(child.title) {model.openRecord(child.id,kind:"task")}.buttonStyle(.link);Spacer();StatusBadge(value:child.text("status"))}
+                                    }
+                                }
+                            }
+                            if !entry.text("lease_expires_at").isEmpty { taskDetailText("Lease", "\(entry.lease_active == true ? "Active" : "Expired") · \(timeLabel(entry.text("lease_expires_at")))") }
+                            if !(entry.dependencies ?? []).isEmpty { VStack(alignment: .leading, spacing: 6) { Text("Dependencies").font(.system(size:13,weight:.semibold)); ForEach(Array((entry.dependencies ?? []).enumerated()), id: \.offset) { _, dep in HStack { Button(dep["title"]?.text ?? "Task") { if let id = dep["id"]?.text { model.openRecord(id, kind: "task") } }.buttonStyle(.link); Spacer(); StatusBadge(value: dep["status"]?.text ?? "unknown") } } } }
+                            taskDetailText("Progress", entry.text("progress"))
+                            if let criteria = entry.body["acceptance"]?.raw as? [String], !criteria.isEmpty {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("Acceptance criteria").font(.system(size:13,weight:.semibold))
+                                    ForEach(criteria, id: \.self) { criterion in
+                                        HStack(alignment:.firstTextBaseline,spacing:8) {
+                                            Text("•").font(.system(size:13)).foregroundStyle(.secondary)
+                                            MarkdownText(markdown:criterion,font:.system(size:13)).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                            }
                             if let completion = entry.body["completion"]?.raw as? [String: Any] {
-                                detailText("Completion · agent reported", completion["summary"] as? String ?? "")
-                                if let evidence = completion["evidence"] as? [[String: Any]] { VStack(alignment: .leading, spacing: 12) { Text("Evidence").font(.headline); ForEach(Array(evidence.enumerated()), id: \.offset) { _, item in VStack(alignment: .leading, spacing: 5) { Text(item["reference"] as? String ?? "").font(.system(.caption, design: .monospaced)); Text(item["outcome"] as? String ?? "").font(.caption).foregroundStyle(.secondary) }.textSelection(.enabled) } } }
+                                taskDetailText("Completion · agent reported", completion["summary"] as? String ?? "")
                             }
                         }
                         if entry.kind == "checkpoint" { detailText("Handoff", entry.text("summary")); detailText("Next action", entry.text("next_action")); stringList("Remaining", entry.body["remaining"]); stringList("Blockers", entry.body["blockers"]); stringList("Completed", entry.body["completed"]) }
@@ -373,20 +535,29 @@ struct InspectorView: View {
                         if !entry.text("node_type").isEmpty { detailText("Resource", entry.text("uri")) }
                         if ["memory", "decision"].contains(entry.kind) { detailText("Content", entry.text("content")); detailText("Source", entry.text("source")) }
                         if entry.kind == "analysis" {AnalysisWorkspace(entry:entry,expanded:expandedDetails).id(entry.id);detailText("SQL",entry.text("sql"));detailText("Interpretation",entry.text("interpretation"))}
-                        if let node = model.selectedGraphNode {
-                            Text("\(node.degree) connected nodes").font(.caption).foregroundStyle(.secondary)
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("Graph connections").font(.headline)
-                                ForEach(Array((model.snapshot?.graph?.edges ?? []).filter { $0.source == node.id || $0.target == node.id }.prefix(30).enumerated()), id: \.offset) { _, edge in
+                        let graphEdges = (model.snapshot?.graph?.edges ?? []).filter { edge in
+                            guard edge.source == entry.id || edge.target == entry.id else {return false}
+                            return entry.kind != "task" || !["source","depends_on","child","related","contains"].contains(edge.relation)
+                        }
+                        if let node = model.selectedGraphNode, !graphEdges.isEmpty {
+                            if entry.kind != "task" { Text("\(graphEdges.count) connections").font(.caption).foregroundStyle(.secondary) }
+                            VStack(alignment: .leading, spacing: 6) {
+                Text(entry.kind == "task" ? "Other connections" : "Graph connections").font(entry.kind == "task" ? .system(size:13,weight:.semibold) : .headline)
+                                ForEach(Array(graphEdges.prefix(30).enumerated()), id: \.offset) { _, edge in
                                     let otherID = edge.source == node.id ? edge.target : edge.source
                                     let other = model.snapshot?.graph?.nodes.first { $0.id == otherID }
                                     Button { model.openRecord(otherID) } label: { VStack(alignment: .leading, spacing: 3) { Text(other?.title ?? otherID).lineLimit(2); Text((edge.source == node.id ? "→ " : "← ") + edge.relation.replacingOccurrences(of: "_", with: " ")).font(.caption2).foregroundStyle(.secondary) } }.buttonStyle(.link)
                                 }
                             }
                         }
-                        if !model.related(to: entry).isEmpty { VStack(alignment: .leading, spacing: 10) { Text("Related records").font(.headline); ForEach(model.related(to: entry)) { related in Button { model.openRecord(related.id, kind: related.kind) } label: { Label(related.title ?? related.id, systemImage: "arrow.up.right.square").lineLimit(2) }.buttonStyle(.link) } } }
-                        DisclosureGroup("Full record") { Text(entry.pretty).font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10) }
-                        Text(entry.id).font(.system(.caption2, design: .monospaced)).foregroundStyle(.tertiary).textSelection(.enabled)
+                        if entry.kind != "task", !model.related(to: entry).isEmpty { VStack(alignment: .leading, spacing: 10) { Text("Related records").font(.headline); ForEach(model.related(to: entry)) { related in Button { model.openRecord(related.id, kind: related.kind) } label: { Label(related.title ?? related.id, systemImage: "arrow.up.right.square").lineLimit(2) }.buttonStyle(.link) } } }
+                        DisclosureGroup("Full record") {
+                            VStack(alignment:.leading,spacing:8) {
+                                Text(entry.pretty).font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                                Text(entry.id).font(.system(.caption2, design: .monospaced)).foregroundStyle(.tertiary).textSelection(.enabled)
+                            }.padding(.top,10)
+                        }
+                        if entry.kind == "task" { TaskSources(model:model,task:entry).id(entry.id) }
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
                 } else { ContentUnavailableView(model.selectedID == nil ? "Select a node" : "Record unavailable", systemImage: "cursorarrow.click", description: Text(model.selectedID == nil ? "Click a graph node to inspect its content, linked resources and relationships." : "This record may have been forgotten or may belong to another project." )).padding(.top, 100) }
             }.frame(maxWidth: .infinity)
@@ -415,7 +586,26 @@ struct InspectorView: View {
             if rows.isEmpty { Text("No saved rows.").font(.caption).foregroundStyle(.secondary) }
         }
     }
-    func detailText(_ title: String, _ text: String) -> some View { VStack(alignment: .leading, spacing: 8) { if !text.isEmpty { Text(title).font(.headline); Text(text).textSelection(.enabled).foregroundStyle(.secondary) } } }
+    @ViewBuilder func detailText(_ title: String, _ text: String) -> some View {
+        if !text.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                Text(text).textSelection(.enabled).foregroundStyle(.secondary)
+            }
+        }
+    }
+    @ViewBuilder func taskDetailText(_ title: String, _ text: String) -> some View {
+        if !text.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size:12,weight:.semibold)).foregroundStyle(.secondary)
+                if title == "Progress" || title.hasPrefix("Completion") {
+                    MarkdownText(markdown:text,font:.system(size:13)).foregroundStyle(.secondary)
+                } else {
+                    Text(text).font(.system(size:13)).textSelection(.enabled).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
 }
 
 #if !INSPECTOR_TESTING

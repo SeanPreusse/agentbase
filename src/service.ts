@@ -19,7 +19,7 @@ export class Agentbase {
       const p = input as Inputs['project_resume'];
       const project = await this.open({root:p.root,name:p.name,goal:p.goal});
       const context = await this.context({project_id:project.id,root:project.working_root,task_id:p.task_id,query:p.query,max_chars:p.max_chars});
-      return {project, ...context};
+      return {project, ...context, ...this.openTaskCandidates(project.id,p.query)};
     }
     if (name === 'project_list') return this.projects(input as Inputs['project_list']);
     if (name === 'backup_verify') return new Recovery(this.store).verify((input as Inputs['backup_verify']).backup_path);
@@ -154,6 +154,7 @@ export class Agentbase {
   private relatedIds(record: RecordData): string[] {
     const ids = new Set(this.store.db.prepare(`SELECT target_id AS id FROM links WHERE source_id=?
       UNION SELECT source_id AS id FROM links WHERE target_id=?`).all(record.id,record.id).map(row => String(row.id)));
+    if (record.kind === 'task') for (const source of record.body.sources ?? []) if (source.kind === 'record' && typeof source.reference === 'string') ids.add(source.reference);
     for (const link of record.body.graph_links ?? []) if (typeof link.target_id === 'string') ids.add(link.target_id);
     for (const row of this.store.db.prepare(`SELECT r.id FROM records r, json_each(r.body,'$.graph_links') link
       WHERE r.project_id=? AND json_extract(link.value,'$.target_id')=?`).all(record.project_id,record.id)) ids.add(String(row.id));
@@ -190,10 +191,29 @@ export class Agentbase {
   private taskDetails(task: RecordData) {
     const dependencies = this.deps(task.id);
     const blocking = dependencies.map(id => this.task(task.project_id, id)).filter(dependency => dependency.body.status !== 'done');
+    const parent = task.body.parent_task_id ? this.task(task.project_id, task.body.parent_task_id) : null;
+    const children = this.store.db.prepare("SELECT id,json_extract(body,'$.title') AS title,json_extract(body,'$.status') AS status FROM records WHERE project_id=? AND kind='task' AND json_extract(body,'$.parent_task_id')=? ORDER BY created_at,id").all(task.project_id,task.id);
     const lease_active = Boolean(this.leaseActive(task));
     return { ...task, dependencies, blockers: blocking.map(dependency => dependency.id),
       blocking_tasks: blocking.map(dependency => ({ id: dependency.id, title: dependency.body.title, status: dependency.body.status })),
+      parent_task: parent ? { id: parent.id, title: parent.body.title, status: parent.body.status } : null,
+      child_tasks: children.map(child => ({ id: String(child.id), title: String(child.title), status: String(child.status) })),
       lease_active, reclaimable: ['in_progress', 'review'].includes(task.body.status) && !lease_active && blocking.length === 0 };
+  }
+  private validateTaskParent(projectId: string, parentId: string | null | undefined, childStatus: string, taskId?: string) {
+    const seen = new Set(taskId ? [taskId] : []);
+    let current = parentId;
+    while (current) {
+      invariant(!seen.has(current), 'TASK_PARENT_CYCLE', 'Task parenting would create a cycle.');
+      seen.add(current);
+      const parent = this.task(projectId, current);
+      invariant(['done','cancelled'].includes(childStatus) || !['done','cancelled'].includes(parent.body.status),
+        'TASK_PARENT_CLOSED', 'An open task cannot be placed under a completed or cancelled parent.');
+      current = parent.body.parent_task_id;
+    }
+  }
+  private openChild(projectId: string, taskId: string) {
+    return this.store.db.prepare("SELECT id FROM records WHERE project_id=? AND kind='task' AND json_extract(body,'$.parent_task_id')=? AND json_extract(body,'$.status') NOT IN ('done','cancelled') LIMIT 1").get(projectId,taskId);
   }
   private leaseActive(task: RecordData) { return task.body.owner && Date.parse(task.body.lease_expires_at ?? '') > this.store.clock(); }
   private checkOwner(task: RecordData, actor: string, required = false) {
@@ -221,7 +241,7 @@ export class Agentbase {
     switch (name) {
       case 'skill_save': {
         const body = { title: p.title, description: p.description, triggers: p.triggers, tags: p.tags,
-          applies_to: p.applies_to, source: p.source, status: p.status };
+          applies_to: p.applies_to, source: p.source, category: p.category, status: p.status };
         if (!p.id) {
           invariant(!p.expected_version, 'INVALID_VERSION', 'A new skill does not have an expected_version.');
           return s.create(projectId, 'skill', body, actor);
@@ -251,9 +271,14 @@ export class Agentbase {
       }
       case 'task_create': {
         this.references(projectId, p.related_ids);
+        const sourceRecordIds = (p.sources ?? []).filter((source: any) => source.kind === 'record').map((source: any) => source.reference);
+        invariant(!sourceRecordIds.includes(''), 'INVALID_SOURCE', 'A record source must include a record ID.');
+        this.references(projectId, sourceRecordIds);
         if (p.plan_id) s.get(projectId, p.plan_id, 'plan');
+        this.validateTaskParent(projectId, p.parent_task_id, p.status);
         const task = s.create(projectId, 'task', { title: p.title, description: p.description, acceptance: p.acceptance,
-          priority: p.priority, status: p.status, requires_evidence: p.requires_evidence, plan_id: p.plan_id }, actor);
+          priority: p.priority, status: p.status, requires_evidence: p.requires_evidence, plan_id: p.plan_id,
+          parent_task_id: p.parent_task_id ?? null, sources: p.sources ?? [] }, actor);
         this.setDependencies(task, p.dependencies);
         s.related(projectId, task.id, [...p.related_ids, ...(p.plan_id ? [p.plan_id] : [])]);
         return task;
@@ -271,7 +296,15 @@ export class Agentbase {
           }
         }
         invariant(!['done', 'cancelled'].includes(task.body.status) || (p.status && p.reason), 'TASK_CLOSED', 'Reopen a closed task with a status and reason before editing it.');
+        if (p.status === 'cancelled') invariant(!this.openChild(projectId,task.id), 'CHILD_TASKS_OPEN', 'Complete, cancel, or move child tasks before cancelling their parent.');
         if (p.dependencies) this.setDependencies(task, p.dependencies);
+        if (p.sources !== undefined) {
+          const sourceRecordIds = p.sources.filter((source: any) => source.kind === 'record').map((source: any) => source.reference);
+          invariant(!sourceRecordIds.includes(task.id), 'INVALID_SOURCE', 'A task cannot cite itself as a source.');
+          this.references(projectId, sourceRecordIds);
+        }
+        if (p.parent_task_id !== undefined || p.status) this.validateTaskParent(projectId,
+          p.parent_task_id === undefined ? task.body.parent_task_id : p.parent_task_id, p.status ?? task.body.status, task.id);
         const { id: _, project_id: __, actor: ___, request_id: ____, expected_version: _____, dependencies, ...patch } = p;
         const body = { ...task.body, ...patch };
         if (p.status && p.status !== 'review') { delete body.owner; delete body.lease_expires_at; }
@@ -291,6 +324,7 @@ export class Agentbase {
         this.checkOwner(task, actor, true);
         invariant(['in_progress', 'review'].includes(task.body.status), 'INVALID_TRANSITION', 'Task must be in progress or review.');
         invariant(!this.blockers(task).length, 'DEPENDENCIES_OPEN', 'Complete dependencies first.');
+        invariant(!this.openChild(projectId,task.id), 'CHILD_TASKS_OPEN', 'Complete or cancel child tasks before completing their parent.');
         invariant(!task.body.requires_evidence || p.evidence.length > 0, 'EVIDENCE_REQUIRED', 'This task requires completion evidence.');
         for (const evidence of p.evidence) if (evidence.kind === 'analysis') s.get(projectId, evidence.reference, 'analysis');
         const { owner, lease_expires_at, ...body } = task.body;
@@ -329,6 +363,7 @@ export class Agentbase {
     const filters = ["r.project_id=?", "r.kind='task'"];
     const args: (string | number)[] = [p.project_id];
     if (p.status) { filters.push("json_extract(r.body,'$.status')=?"); args.push(p.status); }
+    if (p.parent_task_id) { this.task(p.project_id,p.parent_task_id); filters.push("json_extract(r.body,'$.parent_task_id')=?"); args.push(p.parent_task_id); }
     if (p.ready_only) {
       filters.push(`(json_extract(r.body,'$.status')='ready' OR
         (json_extract(r.body,'$.status') IN ('in_progress','review') AND
@@ -343,6 +378,76 @@ export class Agentbase {
       ORDER BY COALESCE(CAST(json_extract(r.body,'$.priority') AS INTEGER),2),r.created_at,r.updated_at DESC,r.rowid DESC
       LIMIT ? OFFSET ?`).all(...args,p.limit,p.offset);
     return { records: rows.map(row => this.taskDetails(this.store.decode(row))), total, limit: p.limit, offset: p.offset };
+  }
+  private openTaskCandidates(projectId: string, query?: string) {
+    const where = "r.project_id=? AND r.kind='task' AND json_extract(r.body,'$.status') IN ('proposed','ready','in_progress','review','blocked')";
+    const words = (value: string) => new Set((value.toLocaleLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])
+      .filter(word => !['and','for','the','with','from','into','this','that','task','project'].includes(word)));
+    const terms = words(query ?? '');
+    const open_task_status_counts: Record<string, number> = {};
+    for (const row of this.store.db.prepare(`SELECT json_extract(r.body,'$.status') AS status,COUNT(*) AS n FROM records r WHERE ${where} GROUP BY status`).all(projectId))
+      open_task_status_counts[String(row.status)] = Number(row.n);
+    const total = Object.values(open_task_status_counts).reduce((count,n) => count+n,0);
+    const fields = `SELECT r.id,r.version,r.body,r.updated_at,
+      json_extract(parent.body,'$.title') AS parent_title,
+      (SELECT COUNT(*) FROM records child WHERE child.project_id=r.project_id AND child.kind='task'
+        AND json_extract(child.body,'$.parent_task_id')=r.id
+        AND json_extract(child.body,'$.status') NOT IN ('done','cancelled')) AS open_child_count`;
+    const parentJoin = "LEFT JOIN records parent ON parent.id=json_extract(r.body,'$.parent_task_id') AND parent.project_id=r.project_id";
+    const rows = this.store.db.prepare(`${fields} FROM records r ${parentJoin}
+      WHERE ${where} ORDER BY r.updated_at DESC,r.rowid DESC LIMIT 200`).all(projectId);
+    let open_task_search_truncated = false;
+    if (terms.size) {
+      const matchRows = (match: string, limit: number) => this.store.db.prepare(`${fields}
+        FROM search_index s JOIN records r ON r.id=s.id ${parentJoin}
+        WHERE search_index MATCH ? AND ${where} ORDER BY rank LIMIT ?`).all(match,projectId,limit+1);
+      const quoted = [...terms].map(word => `"${word.replaceAll('"','""')}"`);
+      const matches = quoted.length > 1 ? matchRows(quoted.join(' AND '),200) : [];
+      const partial = matchRows(quoted.join(' OR '),200);
+      open_task_search_truncated = matches.length>200 || partial.length>200;
+      const seen = new Set(rows.map(row => String(row.id)));
+      for (const row of [...matches.slice(0,200),...partial.slice(0,200)]) {
+        if (!seen.has(String(row.id))) {rows.push(row);seen.add(String(row.id));}
+      }
+    }
+    const candidates = rows.map(row => {
+      const body = JSON.parse(String(row.body));
+      const titleWords = words(body.title ?? '');
+      const descriptionWords = words(body.description ?? '');
+      const parentWords = words(String(row.parent_title ?? ''));
+      const keyword_score = [...terms].reduce((score,word) => score + (titleWords.has(word) ? 3 : 0) + (descriptionWords.has(word) ? 1 : 0) + (parentWords.has(word) ? 1 : 0),0);
+      return { id:String(row.id),version:Number(row.version),title:String(body.title ?? '').slice(0,180),
+        status:String(body.status),priority:Number(body.priority ?? 2),owner:body.owner ?? null,
+        parent_task_id:body.parent_task_id ?? null,parent_task_title:row.parent_title ? String(row.parent_title).slice(0,180) : null,
+        open_child_count:Number(row.open_child_count ?? 0),
+        lease_active:Boolean(body.owner && Date.parse(body.lease_expires_at ?? '') > this.store.clock()),
+        blocked_reason:body.status === 'blocked' ? String(body.reason ?? body.blocked_reason ?? '').slice(0,240) : null,
+        keyword_score,updated_at:String(row.updated_at) };
+    });
+    candidates.sort((a,b) => b.keyword_score-a.keyword_score || a.priority-b.priority || b.updated_at.localeCompare(a.updated_at));
+    const childPreview = this.store.db.prepare(`SELECT id,body FROM records
+      WHERE project_id=? AND kind='task' AND json_extract(body,'$.parent_task_id')=?
+        AND json_extract(body,'$.status') NOT IN ('done','cancelled')
+      ORDER BY COALESCE(CAST(json_extract(body,'$.priority') AS INTEGER),2),created_at,rowid LIMIT 5`);
+    const open_tasks = candidates.slice(0,12).map(({updated_at,...task}) => {
+      if (!task.open_child_count) return {...task,open_children:[],open_children_truncated:false};
+      const open_children = childPreview.all(projectId,task.id).map(row => {
+        const body = JSON.parse(String(row.body));
+        return {id:String(row.id),title:String(body.title ?? '').slice(0,180),status:String(body.status)};
+      });
+      return {...task,open_children,open_children_truncated:task.open_child_count>open_children.length};
+    });
+    const blockedRows = this.store.db.prepare(`SELECT id,version,body FROM records
+      WHERE project_id=? AND kind='task' AND json_extract(body,'$.status')='blocked'
+      ORDER BY updated_at DESC,rowid DESC LIMIT 5`).all(projectId);
+    const blocked_tasks = blockedRows.map(row => {
+      const body = JSON.parse(String(row.body));
+      return {id:String(row.id),version:Number(row.version),title:String(body.title ?? '').slice(0,180),
+        blocked_reason:String(body.reason ?? body.blocked_reason ?? '').slice(0,240)};
+    });
+    return {open_tasks,open_task_count:total,open_task_status_counts,open_tasks_truncated:total>open_tasks.length,
+      open_tasks_scanned:rows.length,open_task_search_truncated,blocked_tasks,
+      blocked_tasks_truncated:(open_task_status_counts.blocked ?? 0)>blocked_tasks.length};
   }
   private checkpoint(p: Inputs['checkpoint_save'], repository: any) {
     const s = this.store;
@@ -397,6 +502,7 @@ export class Agentbase {
     return { task, checkpoint, reason, active_task_count: activeCount,
       active_tasks_truncated: activeCount > activeTaskLimit, active_tasks: active.map(t => ({
       id: t.id, title: t.body.title, status: t.body.status, owner: t.body.owner ?? null,
+      parent_task_id: t.body.parent_task_id ?? null,
       lease_active: Boolean(this.leaseActive(t)),
     })) };
   }
@@ -420,7 +526,8 @@ export class Agentbase {
     const handoff = await this.handoff(p.project_id, p.task_id, p.root);
     const task = handoff.task;
     const relatedIds = task ? this.relatedIds(task) : [];
-    const relevant = [...relatedIds.map(id => s.get(p.project_id, id)), ...(p.query ? s.search(p.project_id, p.query, undefined, 20) : [])];
+    const parent = task?.body.parent_task_id ? s.get(p.project_id, task.body.parent_task_id, 'task') : null;
+    const relevant = [...(parent ? [parent] : []), ...relatedIds.map(id => s.get(p.project_id, id)), ...(p.query ? s.search(p.project_id, p.query, undefined, 20) : [])];
     const active = s.db.prepare(`SELECT * FROM records WHERE project_id=? AND kind IN ('memory','decision')
       AND json_extract(body,'$.scope')='project' AND json_extract(body,'$.status') IN ('active','disputed','stale')
       ORDER BY updated_at DESC,rowid DESC`).all(p.project_id).map(row => s.decode(row));

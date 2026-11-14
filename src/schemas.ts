@@ -10,6 +10,7 @@ const version = z.number().int().positive();
 const page = { limit: z.number().int().min(1).max(100).default(30), offset: z.number().int().min(0).max(100000).default(0) };
 export const statuses = ['proposed', 'ready', 'in_progress', 'review', 'done', 'blocked', 'cancelled'] as const;
 const evidence = z.object({ kind: z.enum(['test', 'commit', 'file', 'analysis', 'manual']), reference: short, outcome: text });
+const taskSource = z.object({ kind: z.enum(['record', 'web', 'document', 'file']), reference: short, title: short.optional(), note: short.optional() });
 const memoryStatus = z.enum(['active', 'disputed', 'stale', 'superseded', 'forgotten']);
 
 export const schemas = {
@@ -25,7 +26,7 @@ export const schemas = {
   graph_get: z.object({ ...project, query: short.optional(), focus_id: id.optional(), view: z.enum(['all','content']).default('all'), depth: z.number().int().min(0).max(3).default(1), limit: z.number().int().min(1).max(500).default(200) }).strict(),
   skill_save: z.object({ ...mutation, id: id.optional(), expected_version: version.optional(), title: short, description: text,
     triggers: z.array(short).max(50).default([]), tags: z.array(short).max(50).default([]), applies_to: z.array(short).max(50).default([]),
-    source: z.string().trim().min(1).max(2000).regex(/^(https?:\/\/|file:\/\/|\/)/), status: z.enum(['active','disabled']).default('active') }).strict(),
+    source: z.string().trim().min(1).max(2000).regex(/^(https?:\/\/|file:\/\/|\/)/), category: z.enum(['General','Coding','Research','Data','Planning','Writing']).default('General'), status: z.enum(['active','disabled']).default('active') }).strict(),
   skill_list: z.object({ ...project, query: short.optional(), status: z.enum(['active','disabled','all']).default('active'), ...page }).strict(),
   skill_recommend: z.object({ ...project, task_id: id.optional(), query: short.optional(), limit: z.number().int().min(1).max(20).default(5) }).strict(),
   search: z.object({ ...project, query: short, kind: z.enum(['task', 'memory', 'decision', 'plan', 'checkpoint', 'analysis', 'dataset']).optional(), ...page }).strict(),
@@ -35,11 +36,11 @@ export const schemas = {
     open_questions: z.array(short).max(50).default([]) }).strict(),
   task_create: z.object({ ...mutation, title: short, description: text, acceptance: z.array(short).min(1).max(30),
     status: z.enum(['proposed', 'ready']).default('ready'), priority: z.number().int().min(0).max(4).default(2),
-    dependencies: ids.default([]), related_ids: ids.default([]), plan_id: id.optional(),
+    dependencies: ids.default([]), related_ids: ids.default([]), sources: z.array(taskSource).max(100).default([]), plan_id: id.optional(), parent_task_id: id.optional(),
     requires_evidence: z.boolean().default(true) }).strict(),
-  task_list: z.object({ ...project, status: z.enum(statuses).optional(), ready_only: z.boolean().default(false), ...page }).strict(),
+  task_list: z.object({ ...project, status: z.enum(statuses).optional(), parent_task_id: id.optional(), ready_only: z.boolean().default(false), ...page }).strict(),
   task_update: z.object({ ...mutation, id, expected_version: version, title: short.optional(), description: text.optional(),
-    acceptance: z.array(short).min(1).max(30).optional(), dependencies: ids.optional(),
+    acceptance: z.array(short).min(1).max(30).optional(), dependencies: ids.optional(), sources: z.array(taskSource).max(100).optional(), parent_task_id: id.nullable().optional(),
     priority: z.number().int().min(0).max(4).optional(),
     status: z.enum(['proposed', 'ready', 'review', 'blocked', 'cancelled']).optional(), reason: text.optional() }).strict(),
   task_claim: z.object({ ...mutation, id, expected_version: version,

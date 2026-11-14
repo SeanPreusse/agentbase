@@ -110,7 +110,7 @@ try {
   assert.equal(skills.data.flatMap(d => d.skills).filter(s => s.name.startsWith('agentbase:') && s.enabled).length, 3);
   let thread = await host.request('thread/start', { cwd: root, ephemeral: true, approvalPolicy: 'never' });
   const server = await waitForMcp(host, thread.thread.id);
-  assert.equal(Object.keys(server.tools).length, 29);
+  assert.equal(Object.keys(server.tools).length, 32);
   assert.equal(server.serverInfo.version, pluginVersion);
   const hostCall = async (tool, args) => {
     const result = await host.request('mcpServer/tool/call', { threadId: thread.thread.id, server: 'agentbase', tool, arguments: args });
@@ -127,7 +127,7 @@ try {
   assert.equal(String(hostAnalysis.body.rows[0][0]), '10');
   const hostMemory = await hostCall('memory_record', { ...hostBase, request_id: 'host-memory', kind: 'fact', title: 'Verified sum', content: 'The host analysis sums to ten.', source: hostAnalysis.id, epistemic_status: 'observed', related_ids: [hostTask.id, hostAnalysis.id] });
   await hostCall('checkpoint_save', { ...hostBase, request_id: 'host-checkpoint', session_id: hostSession.id, task_id: hostTask.id, summary: 'Analysis saved through Codex.', next_action: 'Continue after host restart.', related_ids: [hostMemory.id, hostAnalysis.id], task_progress: { expected_version: hostTask.version, summary: 'Evidence ready.' } });
-  record('codex_plugin_loader', { version: pluginVersion, tool_count: 29, skills_enabled: 3, analysis_and_checkpoint_executed: true, model_calls: 0 });
+  record('codex_plugin_loader', { version: pluginVersion, tool_count: 32, skills_enabled: 3, analysis_and_checkpoint_executed: true, model_calls: 0 });
   await host.stop('SIGKILL');
   host = await startHost({ cwd: root, env });
   thread = await host.request('thread/start', { cwd: root, ephemeral: true, approvalPolicy: 'never' });

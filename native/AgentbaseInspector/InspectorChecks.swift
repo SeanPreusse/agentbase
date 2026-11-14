@@ -6,7 +6,7 @@ import Foundation
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
         let model = Inspector(preferences: preferences, args: [], environment: [:])
-        func snapshot(_ project: String = "project_a", status: String = "connected", completedOnly: Bool = false, totalTasks: Int = 3, searchQuery: String? = nil) throws -> Snapshot {
+        func snapshotData(_ project: String = "project_a", status: String = "connected", completedOnly: Bool = false, totalTasks: Int = 3, searchQuery: String? = nil) throws -> Data {
             var value: [String: Any] = ["status": status, "error": "Synthetic unavailable store", "captured_at": "2026-11-12T00:00:00.000Z", "home": model.home,
                 "projects": [["id": "project_a", "name": "A", "goal": "A", "root": "/a", "task_count": 3], ["id": "project_b", "name": "B", "goal": "B", "root": "/b", "task_count": 0]],
                 "operations": ["agents": [["actor": "agent-a", "tasks": [["id": "task_a", "title": "Active work", "progress": "Running tests", "state": "Claimed", "last_at": "now"]], "task_count": 1]], "attention": [["id": "task_b", "title": "Dependent", "reason": "Waiting for work", "severity": "blocked"], ["id": "task_b", "title": "Dependent", "reason": "Lease expired", "severity": "expired"]], "ready": [], "totals": ["owned": 1], "rules": "Recorded state"],
@@ -22,9 +22,23 @@ import Foundation
                 for index in records.indices { records[index]["project_id"] = project }
                 value["records"] = records
             }
-            return try JSONDecoder().decode(Snapshot.self, from: JSONSerialization.data(withJSONObject: value))
+            return try JSONSerialization.data(withJSONObject: value)
         }
+        func snapshot(_ project: String = "project_a", status: String = "connected", completedOnly: Bool = false, totalTasks: Int = 3, searchQuery: String? = nil) throws -> Snapshot {
+            try JSONDecoder().decode(Snapshot.self, from:snapshotData(project,status:status,completedOnly:completedOnly,totalTasks:totalTasks,searchQuery:searchQuery))
+        }
+        let stream=Inspector(preferences:preferences,args:[],environment:[:])
+        stream.projectID = "project_a"
+        let firstFrame=try snapshotData(), secondFrame=try snapshotData(completedOnly:true)
+        var wire=Data(); wire.append(firstFrame); wire.append(10); wire.append(secondFrame); wire.append(10)
+        stream.consume(Data(wire.prefix(firstFrame.count/2)))
+        precondition(stream.snapshot == nil && stream.failure == nil, "A partial reader chunk waits for its newline")
+        stream.consume(Data(wire.dropFirst(firstFrame.count/2)))
+        precondition(stream.snapshot?.records.first(where:{$0.id == "task_a"})?.text("status") == "done" && stream.failure == nil, "Ordered chunks decode consecutive snapshots")
         model.projectID = "project_a"; model.accept(try snapshot()); model.section = "Tasks"
+        precondition(model.boardFilter == "All" && model.filteredBoardTasks.count == 3, "All is the default task view")
+        precondition(model.connections.workspaceRoot == "/a", "Connection checks use the selected project root")
+        precondition(model.hasActiveWork, "An in-progress task with an active lease animates the corner icon")
         precondition(model.projectID == "project_a")
         precondition(model.snapshot?.operations?.agents.first?.tasks.first?.progress == "Running tests")
         precondition(Set(model.snapshot!.operations!.attention.map(\.identity)).count == 2, "Multiple signals on one task retain distinct identities")
@@ -40,12 +54,23 @@ import Foundation
         model.openRecord("concept_from_search", kind: "concept"); precondition(model.section == "Memory", "Concept search results open the memory panel")
         model.accept(try snapshot("project_b")); precondition(model.snapshot?.selected_project_id == "project_a", "Another project's activity cannot change selection")
         model.accept(try snapshot(status: "error")); precondition(model.snapshot?.records.count == 4 && model.failure != nil, "Keep the last good view on store errors")
+        precondition(!model.hasActiveWork, "A disconnected reader cannot show live work")
         let restored = Inspector(preferences: preferences, args: [], environment: [:]); precondition(restored.projectID == Inspector.allProjectsID && restored.home == model.home)
         model.readerFailed("Synthetic reader crash"); precondition(model.reconnecting && model.snapshot?.records.count == 4)
-        model.togglePause(); precondition(model.paused && !model.reconnecting)
+        model.togglePause(); precondition(model.paused && !model.reconnecting && !model.hasActiveWork)
         try await Task.sleep(nanoseconds: 2_200_000_000)
         precondition(model.paused && model.failure == "Synthetic reader crash", "Pause cancels reconnect")
         let layout = GraphLayout()
+        let hierarchyLayout = GraphLayout()
+        let hierarchyNodes = [
+            GraphNode(id:"child",kind:"task",title:"Subtask",summary:"",status:"ready",uri:nil,degree:1),
+            GraphNode(id:"parent",kind:"task",title:"Parent task",summary:"",status:"ready",uri:nil,degree:2),
+            GraphNode(id:"root",kind:"project",title:"Project",summary:"",status:"",uri:nil,degree:1)
+        ]
+        let hierarchyEdges = [GraphEdge(source:"root",target:"parent",relation:"contains"),GraphEdge(source:"parent",target:"child",relation:"child")]
+        hierarchyLayout.sync(nodes:hierarchyNodes,edges:hierarchyEdges)
+        precondition(abs(hypot(hierarchyLayout.particles["parent"]!.point.x,hierarchyLayout.particles["parent"]!.point.y)-180) < 0.001, "A top-level task starts at the project radius")
+        precondition(abs(hypot(hierarchyLayout.particles["child"]!.point.x-hierarchyLayout.particles["parent"]!.point.x,hierarchyLayout.particles["child"]!.point.y-hierarchyLayout.particles["parent"]!.point.y)-100) < 0.001, "A subtask starts near its parent even when it arrives first")
         let savedCamera = GraphCameraState(scale:1.35,offset:CGPoint(x:-220,y:95))
         let restoredCamera = GraphCameraState(stored:savedCamera.stored)
         precondition(restoredCamera?.scale == savedCamera.scale && restoredCamera?.offset == savedCamera.offset, "Camera zoom and world center survive persistence")
@@ -123,7 +148,7 @@ import Foundation
         let freshEdge = GraphEdge(source:"n0",target:fresh.id,relation:"child")
         layout.sync(nodes:[graphNodes[0],fresh],edges:[freshEdge],newIDs:[fresh.id],now:100)
         precondition(layout.particles["n0"]!.point == parentPoint, "A new node must not reset existing positions")
-        precondition(abs(hypot(layout.particles[fresh.id]!.point.x-parentPoint.x,layout.particles[fresh.id]!.point.y-parentPoint.y)-26) < 0.001, "New nodes spawn near linked neighbors")
+        precondition(abs(hypot(layout.particles[fresh.id]!.point.x-parentPoint.x,layout.particles[fresh.id]!.point.y-parentPoint.y)-100) < 0.001, "New child nodes start at their target distance from the parent")
         precondition(layout.appearance(fresh.id,now:100) == 0)
         precondition(abs(layout.appearance(fresh.id,now:100.4)-0.5) < 0.001)
         precondition(layout.appearance(fresh.id,now:101) == 1)
@@ -131,15 +156,48 @@ import Foundation
         layout.sync(nodes:[fresh,graphNodes[0]],edges:[freshEdge],now:100.2)
         precondition(layout.births[fresh.id] == 100, "Refresh must not restart birth animation")
         precondition(layout.particles[fresh.id]!.point == freshPoint && layout.heat == 0, "Record ordering alone does not move or reheat the graph")
-        model.accept(try snapshot()); model.selectedID = "task_a"
+        model.paused = false; model.accept(try snapshot()); model.selectedID = "task_a"
+        precondition(model.hasActiveWork, "Live updates restore the working indicator")
         precondition(model.kanbanTasks.count == 3)
-        precondition(KanbanColumn.visible(for:model.kanbanTasks).map(\.id) == ["proposed","ready","in_progress","done"])
-        precondition(!KanbanColumn.visible(for:model.kanbanTasks,includingClosed:false).contains { ["done","cancelled"].contains($0.id) }, "Closed columns stay hidden in active filters")
+        precondition(KanbanWorkspace(model:model).columns.map(\.id) == ["queue","active","attention","done"], "All is the default board view and includes Done")
+        precondition(KanbanColumn.placement(for:model.kanbanTasks.first(where:{$0.id == "task_b"})!) == "attention", "An unmet dependency belongs in Needs attention")
+        model.boardFilter = "Open"
+        precondition(KanbanWorkspace(model:model).columns.map(\.id) == ["queue","active","attention"] && !model.filteredBoardTasks.contains { ["done","cancelled"].contains($0.text("status")) }, "Open filters hide closed tasks")
+        model.boardFilter = "Done"
+        precondition(KanbanWorkspace(model:model).columns.map(\.id) == ["done"] && model.filteredBoardTasks.allSatisfy { ["done","cancelled"].contains($0.text("status")) }, "Done focuses closed tasks")
+        model.boardFilter = "All"
         precondition(model.kanbanTasks.filter{$0.text("status")=="in_progress"}.map(\.id) == ["task_a"])
         model.setViewMode("Kanban"); precondition(model.viewMode == "Kanban" && model.selectedID == nil)
         let boardRestored = Inspector(preferences:preferences,args:[],environment:[:]); precondition(boardRestored.viewMode == "Kanban")
         model.setViewMode("Skills"); precondition(model.viewMode == "Skills" && model.selectedID == nil)
         let skillsRestored = Inspector(preferences:preferences,args:[],environment:[:]); precondition(skillsRestored.viewMode == "Skills")
+        let skillRoot=FileManager.default.temporaryDirectory.appendingPathComponent("agentbase-skill-template-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at:skillRoot,withIntermediateDirectories:true)
+        defer {try? FileManager.default.removeItem(at:skillRoot)}
+        let skillCatalog=SkillCatalogModel()
+        func skillEntry(_ id:String, _ title:String, _ category:String?) throws -> Entry {
+            var body:[String:Any] = ["title":title,"description":"Project skill","status":"active"]
+            if let category { body["category"] = category }
+            return try JSONDecoder().decode(Entry.self,from:JSONSerialization.data(withJSONObject:["id":id,"project_id":"project_a","kind":"skill","version":1,"updated_at":"now","body":body]))
+        }
+        skillCatalog.skills = [try skillEntry("coding","Review code","Coding"),try skillEntry("general","Write notes",nil)]
+        skillCatalog.selectedID = "general"
+        skillCatalog.selectedCategory = "Coding"; skillCatalog.selectVisibleSkill()
+        precondition(skillCatalog.filtered.map(\.id) == ["coding"] && skillCatalog.selectedID == "coding", "Category filtering keeps the detail selection visible")
+        skillCatalog.search = "missing"; skillCatalog.selectVisibleSkill()
+        precondition(skillCatalog.filtered.isEmpty && skillCatalog.selectedID == nil, "Search and category filters combine")
+        skillCatalog.search = ""; skillCatalog.selectedCategory = "General"; skillCatalog.selectVisibleSkill()
+        precondition(skillCatalog.filtered.map(\.id) == ["general"], "Older skills without a category remain in General")
+        skillCatalog.load(home:model.home,projectID:Inspector.allProjectsID)
+        precondition(skillCatalog.skills.isEmpty && skillCatalog.selectedID == nil, "All Projects clears the project catalog")
+        skillCatalog.beginNew(template:SkillTemplate.all.first(where:{$0.id == "review"})!,projectRoot:skillRoot.path)
+        precondition(skillCatalog.category == "Coding" && skillCatalog.canSave && skillCatalog.createsFile)
+        let firstSkillFile=try skillCatalog.createSkillFile()
+        let firstSkillText=try String(contentsOf:firstSkillFile,encoding:.utf8)
+        precondition(firstSkillFile.path.hasPrefix(skillRoot.path + "/.agents/skills/") && firstSkillText.contains("name: review-code") && firstSkillText.contains("# Workflow"), "A template creates a usable project-local skill file")
+        let secondSkillFile=try skillCatalog.createSkillFile()
+        let firstSkillAfterSecond=try String(contentsOf:firstSkillFile,encoding:.utf8)
+        precondition(secondSkillFile != firstSkillFile && firstSkillAfterSecond == firstSkillText, "Creating a same-named skill does not overwrite the first one")
         model.setViewMode("Graph"); precondition(model.viewMode == "Graph" && model.snapshot?.records.count == 4)
         model.setViewMode("invalid"); precondition(model.viewMode == "Graph")
         model.resetNavigation(); model.openRecord("task_a"); model.openRecord("task_b"); model.openRecord("plan_a")
@@ -151,17 +209,20 @@ import Foundation
         for i in 0..<70 {model.openRecord("history-\(i)")}; precondition(model.history.count == 50 && model.historyIndex == 49)
         model.resetNavigation(); precondition(model.history.isEmpty && !model.canGoBack && !model.canGoForward)
         model.boardFilter = "Open"; precondition(model.filteredBoardTasks.count == 2)
+        model.boardFilter = "Done"; precondition(model.filteredBoardTasks.map(\.id) == ["task_c"])
         model.boardFilter = "Needs attention"; precondition(model.filteredBoardTasks.map(\.id) == ["task_b"])
+        model.boardFilter = "All"
         model.boardQuery = "no match"; precondition(model.filteredBoardTasks.isEmpty)
-        model.showOnBoard("task_a"); precondition(model.viewMode == "Kanban" && model.boardQuery.isEmpty && model.boardFilter == "All tasks" && model.selectedID == "task_a")
+        model.showOnBoard("task_a"); precondition(model.viewMode == "Kanban" && model.boardQuery.isEmpty && model.boardFilter == "All" && model.selectedID == "task_a")
         let focusToken = model.graphFocusRequest; model.showInGraph("task_a")
         precondition(model.viewMode == "Graph" && model.selectedID == "task_a" && model.graphFocusID == "task_a" && model.graphFocusRequest != focusToken)
         model.accept(try snapshot(completedOnly:true)); model.boardFilter = "Open"; model.boardQuery = ""
+        precondition(!model.hasActiveWork, "A completed task cannot animate the corner icon")
         precondition(model.filteredBoardTasks.isEmpty && model.boardHasFilters)
         precondition(model.boardEmptyExplanation == "All 3 saved tasks are completed or cancelled.")
         model.clearBoardFilters(); precondition(!model.boardHasFilters && model.filteredBoardTasks.count == 3 && model.boardEmptyExplanation == nil)
         model.boardQuery = "unmatched search"; precondition(model.boardEmptyExplanation == "No tasks match this search.")
-        model.clearBoardFilters(); precondition(model.boardQuery.isEmpty && model.boardFilter == "All tasks")
+        model.clearBoardFilters(); precondition(model.boardQuery.isEmpty && model.boardFilter == "All")
         model.accept(try snapshot(completedOnly:true,totalTasks:200)); model.boardFilter = "Open"
         precondition(model.boardEmptyExplanation == "No open tasks in the loaded records.", "Partial history must not imply every saved task is closed")
         model.boardFilter = "Needs attention"; precondition(model.boardEmptyExplanation == "No loaded tasks need attention.")
@@ -201,11 +262,17 @@ import Foundation
         model.resetNavigation();precondition(model.graphQuery.isEmpty && model.graphFocusID == nil)
         workspaceLaunch.stop();envLaunch.stop()
         let setup=ConnectionsModel()
+        setup.setWorkspace("/a")
         func connectionReply(_ data:[String:Any]) throws -> ConnectionReply {try JSONDecoder().decode(ConnectionReply.self,from:JSONSerialization.data(withJSONObject:data))}
         setup.apply(try connectionReply(["ok":true,"codex_available":true,"installed":false,"enabled":false,"install_available":true]))
         precondition(ConnectionsButton(model:setup).status == "Not installed")
         setup.apply(try connectionReply(["ok":true,"codex_available":true,"installed":true,"enabled":true,"version":"test-version","reconnect_required":true]))
-        precondition(ConnectionsButton(model:setup).status == "Enabled · test-version")
+        precondition(ConnectionsButton(model:setup).status == "Enabled in settings · test-version")
+        setup.apply(try connectionReply(["ok":true,"codex_available":true,"installed":true,"enabled":true,"version":"test-version","codex_tool_count":32]))
+        precondition(ConnectionsButton(model:setup).status == "Tools verified · test-version")
+        setup.setWorkspace("/b")
+        precondition(setup.state == nil && setup.workspaceRoot == "/b", "Changing projects clears stale verification")
+        setup.apply(try connectionReply(["ok":true,"codex_available":true,"installed":true,"enabled":true,"version":"test-version","codex_tool_count":32]))
         setup.apply(try connectionReply(["ok":false,"error":"Synthetic setup failure"]))
         precondition(setup.state?.enabled == true && setup.error == "Synthetic setup failure","Failure retains last confirmed state")
         setup.apply(try connectionReply(["ok":true,"codex_available":true,"installed":true,"enabled":false]))
@@ -213,6 +280,19 @@ import Foundation
         setup.apply(try connectionReply(["ok":true,"codex_available":false,"installed":false]))
         precondition(ConnectionsButton(model:setup).status == "Codex CLI not found")
         setup.run("unsupported");precondition(!setup.busy)
+        let codexHome=FileManager.default.temporaryDirectory.appendingPathComponent("agentbase-codex-discovery-\(UUID().uuidString)")
+        defer {try? FileManager.default.removeItem(at:codexHome)}
+        #if arch(arm64)
+        let platform="macos-aarch64"
+        #else
+        let platform="macos-x86_64"
+        #endif
+        let bundledCodex=codexHome.appendingPathComponent(".vscode/extensions/openai.chatgpt-test/bin/\(platform)/codex")
+        try FileManager.default.createDirectory(at:bundledCodex.deletingLastPathComponent(),withIntermediateDirectories:true)
+        try Data().write(to:bundledCodex)
+        try FileManager.default.setAttributes([.posixPermissions:0o755],ofItemAtPath:bundledCodex.path)
+        precondition(codexExecutable("codex",searchPath:"/nonexistent",home:codexHome.path)==bundledCodex.path)
+        precondition(codexExecutable("/custom/codex",searchPath:"/nonexistent",home:codexHome.path)=="/custom/codex")
         func analysisEntry(_ rows:[[Any]],type:String="DECIMAL(18,2)") throws -> Entry {
             let value:[String:Any] = ["id":"analysis_test","project_id":"project_a","kind":"analysis","version":1,"updated_at":"now","body":["title":"Synthetic chart check","columns":[["name":"month","type":"DATE"],["name":"value","type":type]],"rows":rows,"truncated":true,"inspector_rows_omitted":5]]
             return try JSONDecoder().decode(Entry.self,from:JSONSerialization.data(withJSONObject:value))

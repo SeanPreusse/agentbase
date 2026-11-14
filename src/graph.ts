@@ -37,7 +37,8 @@ export function projectGraph(db: DatabaseSync, projectId: string, options: Graph
     const focus=records.find(r=>r.id===wanted);
     if(focus) {
       const b=focus.body;
-      for(const key of ['parent_id','task_id','plan_id','session_id','previous_version_id','supersedes']) if(typeof b[key]==='string') neighborIDs.add(b[key]);
+      for(const key of ['parent_id','parent_task_id','task_id','plan_id','session_id','previous_version_id','supersedes']) if(typeof b[key]==='string') neighborIDs.add(b[key]);
+      for(const source of b.sources ?? []) if(source.kind==='record' && typeof source.reference==='string') neighborIDs.add(source.reference);
       for(const link of b.graph_links ?? []) neighborIDs.add(link.target_id);
       for(const id of b.related_ids ?? []) neighborIDs.add(id);
       for(const ds of b.datasets ?? []) neighborIDs.add(ds.id);
@@ -45,8 +46,9 @@ export function projectGraph(db: DatabaseSync, projectId: string, options: Graph
     for(const row of db.prepare(`SELECT r.* FROM records r WHERE r.project_id=? AND COALESCE(json_extract(r.body,'$.status'),'')!='forgotten' AND (
       r.id IN (SELECT CASE WHEN source_id=? THEN target_id ELSE source_id END FROM links WHERE source_id=? OR target_id=?) OR
       r.id IN (SELECT CASE WHEN task_id=? THEN depends_on ELSE task_id END FROM dependencies WHERE task_id=? OR depends_on=?) OR
-      json_extract(r.body,'$.parent_id')=? OR json_extract(r.body,'$.task_id')=? OR json_extract(r.body,'$.plan_id')=? OR
-      EXISTS(SELECT 1 FROM json_each(r.body,'$.graph_links') j WHERE json_extract(j.value,'$.target_id')=?)) ORDER BY r.updated_at DESC,r.rowid DESC LIMIT 80`).all(projectId,wanted,wanted,wanted,wanted,wanted,wanted,wanted,wanted,wanted,wanted)) {
+      json_extract(r.body,'$.parent_id')=? OR json_extract(r.body,'$.parent_task_id')=? OR json_extract(r.body,'$.task_id')=? OR json_extract(r.body,'$.plan_id')=? OR
+      EXISTS(SELECT 1 FROM json_each(r.body,'$.sources') source WHERE json_extract(source.value,'$.kind')='record' AND json_extract(source.value,'$.reference')=?) OR
+      EXISTS(SELECT 1 FROM json_each(r.body,'$.graph_links') j WHERE json_extract(j.value,'$.target_id')=?)) ORDER BY r.updated_at DESC,r.rowid DESC LIMIT 80`).all(projectId,wanted,wanted,wanted,wanted,wanted,wanted,wanted,wanted,wanted,wanted,wanted,wanted)) {
       neighborIDs.add(String(row.id));
     }
     const present=new Set(records.map(r=>r.id));
@@ -78,11 +80,13 @@ export function projectGraph(db: DatabaseSync, projectId: string, options: Graph
   for (const r of records) {
     const b = r.body;
     if (b.parent_id) add(b.parent_id, r.id, 'child');
+    if (r.kind === 'task' && b.parent_task_id) add(b.parent_task_id, r.id, 'child');
+    if (r.kind === 'task') for (const source of b.sources ?? []) if (source.kind === 'record' && typeof source.reference === 'string') add(r.id, source.reference, 'source');
     for (const key of ['task_id', 'plan_id', 'session_id', 'previous_version_id', 'supersedes']) if (b[key]) add(r.id, b[key], key.replace('_id',''));
     for (const link of b.graph_links ?? []) add(r.id, link.target_id, link.relation);
     for (const key of b.related_ids ?? []) add(r.id, key, 'related');
     for (const ds of b.datasets ?? []) add(r.id, ds.id, 'dataset');
-    for (const e of b.completion?.evidence ?? b.evidence ?? []) if (e.kind === 'analysis') add(r.id, e.reference, 'evidence');
+    for (const e of b.completion?.evidence ?? b.evidence ?? []) if (e.kind === 'analysis') add(r.id, e.reference, 'source');
     const content = [b.content, b.description, b.summary, b.goal].filter(v => typeof v === 'string').join('\n');
     for (const match of content.matchAll(/\[\[([^\]\n]{1,500})\]\]/g)) {
       const label = match[1]!.split('|')[0]!.split('#')[0]!.trim();
@@ -135,7 +139,7 @@ export function projectGraph(db: DatabaseSync, projectId: string, options: Graph
     backlinks: options.focus_id ? edges.filter(e => e.target === options.focus_id && selected.has(e.source)) : [],
     unresolved: unresolved.filter(v => selected.has(v.source)), total_nodes: nodes.size, total_edges: edges.length,
     omitted_nodes: nodes.size - selected.size, source_truncated: rows.length === 10000, query: options.query ?? '', focus_id: options.focus_id ?? null,
-    root_id: project ? projectId : null, project: project ? {id:projectId,name:project.name,root:rootPath,registered_root:project.root} : null, view: options.view ?? 'all', note: 'Explicit links, typed record references and unambiguous [[wikilinks]]. Search uses keywords and graph traversal, not embeddings. Child edges point from parent to child. The derived project root uses contains edges for graph membership; these are excluded from ordinary search/focus traversal.' };
+    root_id: project ? projectId : null, project: project ? {id:projectId,name:project.name,root:rootPath,registered_root:project.root} : null, view: options.view ?? 'all', note: 'Explicit links, typed record references and unambiguous [[wikilinks]]. Search uses keywords and graph traversal, not embeddings. Child edges point from concept or task parent to child. Dependencies describe work order, not hierarchy. The derived project root uses contains edges for graph membership; these are excluded from ordinary search/focus traversal.' };
 }
 
 

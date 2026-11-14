@@ -64,25 +64,49 @@ enum GraphCameraPersistence {
         let hadExisting = !particles.isEmpty; let previousEdges = Set(self.edges)
         self.nodes = nodes; self.edges = edges
         var updated = particles.filter { ids.contains($0.key) }
-        for (i,node) in nodes.enumerated() where updated[node.id] == nil {
-            let angle = Double(i) * 2.399963; let radius = 25 + sqrt(Double(i + 1)) * 35
-            let connected = edges.compactMap { edge -> CGPoint? in
-                if edge.source == node.id { return updated[edge.target]?.point }
-                if edge.target == node.id { return updated[edge.source]?.point }
-                return nil
+        var hierarchy: [String: GraphEdge] = [:]
+        func priority(_ relation: String) -> Int { relation == "child" ? 3 : relation == "plan" ? 2 : relation == "contains" ? 1 : 0 }
+        for edge in edges where priority(edge.relation) > 0 {
+            let child = edge.relation == "plan" ? edge.source : edge.target
+            if priority(edge.relation) > priority(hierarchy[child]?.relation ?? "") { hierarchy[child] = edge }
+        }
+        var pending = nodes.enumerated().filter { updated[$0.element.id] == nil }
+        while !pending.isEmpty {
+            let ready = pending.filter { _, node in
+                guard node.kind != "project", let edge = hierarchy[node.id] else { return node.kind == "project" }
+                return updated[edge.source == node.id ? edge.target : edge.source] != nil
             }
-            let point: CGPoint
-            if node.kind == "project" && !hadExisting {
-                let projectIndex = nodes[..<i].filter { $0.kind == "project" }.count
-                let projectCount = max(1, nodes.filter { $0.kind == "project" }.count)
-                let projectAngle = 2 * Double.pi * Double(projectIndex) / Double(projectCount)
-                point = projectCount == 1 ? .zero : CGPoint(x: cos(projectAngle) * 180, y: sin(projectAngle) * 180)
+            let batch = ready.isEmpty ? [pending[0]] : ready
+            for (i,node) in batch {
+                let angle = Double(i) * 2.399963; let radius = 25 + sqrt(Double(i + 1)) * 35
+                let parent = hierarchy[node.id].flatMap { edge in
+                    updated[edge.source == node.id ? edge.target : edge.source] == nil ? nil : edge
+                }
+                let connected = edges.compactMap { edge -> CGPoint? in
+                    if edge.source == node.id { return updated[edge.target]?.point }
+                    if edge.target == node.id { return updated[edge.source]?.point }
+                    return nil
+                }
+                let point: CGPoint
+                if node.kind == "project" && !hadExisting {
+                    let projectIndex = nodes[..<i].filter { $0.kind == "project" }.count
+                    let projectCount = max(1, nodes.filter { $0.kind == "project" }.count)
+                    let projectAngle = 2 * Double.pi * Double(projectIndex) / Double(projectCount)
+                    point = projectCount == 1 ? .zero : CGPoint(x: cos(projectAngle) * 180, y: sin(projectAngle) * 180)
+                }
+                else if let parent {
+                    let anchor = updated[parent.source == node.id ? parent.target : parent.source]!.point
+                    let distance = parent.relation == "contains" ? 180.0 : parent.relation == "child" ? 100.0 : 135.0
+                    point = CGPoint(x:anchor.x + cos(angle)*distance,y:anchor.y + sin(angle)*distance)
+                }
+                else if !connected.isEmpty {
+                    let x = connected.map(\.x).reduce(0,+) / Double(connected.count), y = connected.map(\.y).reduce(0,+) / Double(connected.count)
+                    point = CGPoint(x:x + cos(angle)*100,y:y + sin(angle)*100)
+                } else { point = CGPoint(x:cos(angle)*radius,y:sin(angle)*radius) }
+                updated[node.id] = GraphParticle(point:point)
             }
-            else if !connected.isEmpty {
-                let x = connected.map(\.x).reduce(0,+) / Double(connected.count), y = connected.map(\.y).reduce(0,+) / Double(connected.count)
-                point = CGPoint(x:x + cos(angle)*26,y:y + sin(angle)*26)
-            } else { point = CGPoint(x:cos(angle)*radius,y:sin(angle)*radius) }
-            updated[node.id] = GraphParticle(point:point)
+            let placed = Set(batch.map { $0.element.id })
+            pending.removeAll { placed.contains($0.element.id) }
         }
         particles = updated
         births = births.filter { ids.contains($0.key) && now - $0.value < 3 }
@@ -250,7 +274,7 @@ struct GraphWorkspace: View {
                     HStack(spacing:6) { Circle().fill(model.paused || model.failure != nil ? Color.orange : accent).frame(width:4,height:4); Text("\(graphNodes.count) nodes · \(graphEdges.count) links"); if (payload?.omitted_nodes ?? 0) > 0 { Text("· \(payload!.omitted_nodes) outside view") }; if !(payload?.unresolved?.isEmpty ?? true) { Text("· \(payload!.unresolved!.count) unresolved").foregroundStyle(.orange).help(payload!.unresolved!.map { $0.label }.joined(separator:"\n")) } }.font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)
                     Spacer()
                     Button(action:fit) { Image(systemName:"arrow.up.left.and.arrow.down.right").frame(width:28,height:28) }.buttonStyle(.plain).foregroundStyle(.secondary).help("Fit graph · 0")
-                }.padding(18) }
+                }.padding(.leading,62).padding(.trailing,18).padding(.vertical,18) }
             }.onAppear { size = geometry.size; sync() }.onChange(of:geometry.size) { _,value in size = value }
         }.onChange(of:model.projectID) { _,_ in knownIDs = []; restoredPositionsFor = nil; restoredCameraFor = nil; didFit = false; didSettleFit = false; cameraTouched = false; offset = .zero; layout.particles = [:]; layout.births = [:]; layout.edgeBirths = [:]; sync() }
          .onChange(of:model.graphQuery) { _,value in if value.count>200 {model.graphQuery=String(value.prefix(200))};model.scheduleGraphSearch() }

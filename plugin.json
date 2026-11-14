@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "agentbase",
-  "version": "0.7.0",
+  "version": "0.7.5",
   "description": "Persistent project memory, plans, evidence-backed tasks, handoffs, and local data analysis for agents.",
   "extensions": {
     "com.openai": {

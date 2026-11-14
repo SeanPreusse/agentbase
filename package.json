@@ -1,11 +1,11 @@
 {
   "name": "agentbase",
-  "version": "0.7.0",
+  "version": "0.7.5",
   "description": "Persistent project memory, evidence-backed tasks, handoffs, and local analysis for AI agents.",
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=24.15.0"
+    "node": ">=22.22.0"
   },
   "bin": {
     "agentbase": "bin/agentbase.mjs"
@@ -40,6 +40,7 @@
     "prepack": "npm run build",
     "ui:build": "node scripts/native-ui.mjs",
     "ui": "node scripts/native-ui.mjs --open",
+    "release:mac": "node scripts/release-mac.mjs",
     "test:ui": "node scripts/test-native-ui.mjs",
     "test:graph": "node scripts/test-graph.mjs"
   },
