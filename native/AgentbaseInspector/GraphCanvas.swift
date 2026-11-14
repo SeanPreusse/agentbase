@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 struct GraphNode: Decodable, Identifiable {
     let id: String; let kind: String; let title: String; let summary: String; let status: String; let uri: String?; let degree: Int
@@ -234,8 +235,9 @@ struct GraphWorkspace: View {
     @State private var didSettleFit = false
     @State private var cameraTouched = false
     @State private var size = CGSize(width: 800,height: 700)
+    @State private var timerConnection: AnyCancellable?
     @FocusState private var searchFocused: Bool
-    private let timer = Timer.publish(every: 1.0 / 30, on: .main, in: .common).autoconnect()
+    private let timer = Timer.publish(every: 1.0 / 30, on: .main, in: .common)
     var payload: GraphPayload? { model.snapshot?.graph }
     var graphNodes: [GraphNode] {
         let allowed = (payload?.nodes ?? []).filter { !hidden.contains($0.kind) }
@@ -289,13 +291,24 @@ struct GraphWorkspace: View {
                     Spacer()
                     Button(action:fit) { Image(systemName:"arrow.up.left.and.arrow.down.right").frame(width:28,height:28) }.buttonStyle(.plain).foregroundStyle(.secondary).help("Fit graph · 0")
                 }.padding(.leading,62).padding(.trailing,18).padding(.vertical,18) }
-            }.onAppear { size = geometry.size; syncIfChanged(force:true) }.onChange(of:geometry.size) { _,value in size = value }
+            }.onAppear { size = geometry.size; syncIfChanged(force:true); syncTimer() }.onChange(of:geometry.size) { _,value in size = value }
         }.onChange(of:model.projectID) { _,_ in knownIDs = []; restoredPositionsFor = nil; restoredCameraFor = nil; didFit = false; didSettleFit = false; cameraTouched = false; offset = .zero; layout.particles = [:]; layout.births = [:]; layout.edgeBirths = [:]; sync() }
          .onChange(of:model.graphQuery) { _,value in if value.count>200 {model.graphQuery=String(value.prefix(200))};model.scheduleGraphSearch() }
          .onChange(of:model.receivedAt) { _,_ in syncIfChanged() }
          .onChange(of:hidden) { _,_ in syncIfChanged() }
          .onChange(of:model.graphFocusRequest) { _,_ in focusRequested() }.onChange(of:model.includeBackground) { _,_ in model.start() }
-         .onReceive(timer) { _ in if running && model.viewMode == "Graph" { layout.step(); if layout.heat < 0.08 && !didSettleFit { if !cameraTouched { fit() }; didSettleFit = true; savePositions() } } }
+         .onChange(of:model.viewMode) { _,_ in syncTimer() }
+         .onChange(of:running) { _,_ in syncTimer() }
+         .onDisappear { timerConnection?.cancel(); timerConnection = nil }
+         .onReceive(timer) { _ in layout.step(); if layout.heat < 0.08 && !didSettleFit { if !cameraTouched { fit() }; didSettleFit = true; savePositions() } }
+    }
+    func syncTimer() {
+        if running && model.viewMode == "Graph" {
+            if timerConnection == nil { timerConnection = AnyCancellable(timer.connect()) }
+        } else {
+            timerConnection?.cancel()
+            timerConnection = nil
+        }
     }
     var controls: some View {
         HStack(spacing:10) {
