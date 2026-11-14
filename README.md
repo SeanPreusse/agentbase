@@ -1,22 +1,21 @@
 # AgentBase
 
-**Project memory for AI agents.** Keep decisions, research, tasks, and analysis connected so work can pick up again in a fresh session.
+**Local-first storage and memory for AI agents.** Keep project knowledge, tasks, data, and analysis together so work can pick up again in a fresh session.
 
-AgentBase is a local-first MCP server and Codex plugin. It stores project knowledge on your machine and gives agents a searchable record of what happened, why, and what to do next.
+AgentBase is an MCP server, Codex plugin, and macOS inspector for persistent project state. Its local SQLite store keeps knowledge and work history; DuckDB powers sandboxed SQL analysis over imported project data.
 
-## See it
+## App preview
 
-| Project knowledge | Work at a glance |
-| --- | --- |
-| ![AgentBase graph connecting project knowledge, sources, and tasks](docs/screenshots/graph.png) | ![AgentBase task board with Queue, Active, Needs attention, and Done](docs/screenshots/kanban.png) |
+![AgentBase inspector switching between its project graph and All-tasks board](docs/screenshots/showcase.gif)
+
+[Graph screenshot](docs/screenshots/graph.png) · [All-tasks screenshot](docs/screenshots/kanban.png)
 
 ## What it does
 
-- Saves sourced knowledge, decisions, plans, and handoffs.
-- Tracks tasks, dependencies, progress, and completion evidence.
-- Helps agents find relevant past work and continue it across sessions.
-- Imports and analyzes project data locally.
-- Includes a native macOS inspector for the knowledge graph and task board.
+- Stores sourced knowledge, decisions, tasks, plans, and handoffs in a local project database.
+- Uses DuckDB to run sandboxed SQL over imported CSV, JSON, JSONL, and Parquet data; saved analyses keep their query, bounded results, and provenance.
+- Backs up project records and imported dataset files together.
+- Helps agents find relevant past work and continue it across sessions, with a native macOS inspector for the graph and task board.
 
 AgentBase does not call a model or send project data to a hosted service. The MCP server and project store run locally.
 
