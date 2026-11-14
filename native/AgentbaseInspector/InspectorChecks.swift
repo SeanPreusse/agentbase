@@ -175,6 +175,17 @@ import Foundation
         try FileManager.default.createDirectory(at:skillRoot,withIntermediateDirectories:true)
         defer {try? FileManager.default.removeItem(at:skillRoot)}
         let skillCatalog=SkillCatalogModel()
+        let skillJSON = Data(#"{"records":[{"id":"skill_warning_check","project_id":"project_a","kind":"skill","version":1,"updated_at":"now","body":{"title":"Research","description":"Find sources","source":"/skills/research/SKILL.md"}}]}"#.utf8)
+        let nodeWarning = Data("(node:1234) ExperimentalWarning: SQLite is an experimental feature.\n".utf8)
+        let cleanSkillResponse = try skillCommandOutput(stdout:skillJSON,stderr:nodeWarning,terminationStatus:0)
+        let decodedSkillIDs = try decodeSkillCatalog(cleanSkillResponse).map(\.id)
+        precondition(decodedSkillIDs == ["skill_warning_check"], "Node stderr diagnostics do not corrupt skill-list JSON")
+        do {
+            _ = try skillCommandOutput(stdout:Data(),stderr:Data("{\"error\":\"Missing project\"}".utf8),terminationStatus:1)
+            preconditionFailure("A failed skill command must preserve its diagnostic")
+        } catch {
+            precondition(error.localizedDescription.contains("Missing project"), "Skill command errors remain visible")
+        }
         func skillEntry(_ id:String, _ title:String, _ category:String?) throws -> Entry {
             var body:[String:Any] = ["title":title,"description":"Project skill","status":"active"]
             if let category { body["category"] = category }

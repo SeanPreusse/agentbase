@@ -2,6 +2,22 @@ import SwiftUI
 
 private struct SkillCatalog: Decodable { let records: [Entry] }
 
+func decodeSkillCatalog(_ data: Data) throws -> [Entry] {
+    try JSONDecoder().decode(SkillCatalog.self, from:data).records
+}
+
+func skillCommandOutput(stdout: Data, stderr: Data, terminationStatus: Int32) throws -> Data {
+    guard terminationStatus == 0 else {
+        let diagnostic = stderr.isEmpty ? stdout : stderr
+        let message = String(data:diagnostic,encoding:.utf8)?.trimmingCharacters(in:.whitespacesAndNewlines)
+        throw NSError(domain:"Skills",code:Int(terminationStatus),userInfo:[NSLocalizedDescriptionKey:message?.isEmpty == false ? message! : "Skill operation failed."])
+    }
+    guard !stdout.isEmpty else {
+        throw NSError(domain:"Skills",code:4,userInfo:[NSLocalizedDescriptionKey:"Skill command returned no JSON data."])
+    }
+    return stdout
+}
+
 struct SkillTemplate: Identifiable {
     let id: String
     let category: String
@@ -79,7 +95,7 @@ final class SkillCatalogModel: ObservableObject {
             do {
                 let listed = try await call("skill_list", projectID: projectID, home: home, fields: ["status":"all", "limit":100, "offset":0])
                 guard revision == loadRevision else { return }
-                var records = try JSONDecoder().decode(SkillCatalog.self, from: listed).records
+                var records = try decodeSkillCatalog(listed)
                 var added = 0
                 let runtime = try runtimeConfig()
                 for item in bundled {
@@ -185,18 +201,23 @@ final class SkillCatalogModel: ObservableObject {
         return try await Task.detached {
             guard let payload = String(data:input,encoding:.utf8) else { throw NSError(domain:"Skills",code:2,userInfo:[NSLocalizedDescriptionKey:"Could not encode the skill request."]) }
             let process = Process()
-            let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("agentbase-skill-\(UUID().uuidString).log")
+            let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("agentbase-skill-\(UUID().uuidString).out")
+            let errorURL = FileManager.default.temporaryDirectory.appendingPathComponent("agentbase-skill-\(UUID().uuidString).err")
             FileManager.default.createFile(atPath:outputURL.path,contents:nil)
-            defer { try? FileManager.default.removeItem(at:outputURL) }
-            let outputFile = try FileHandle(forUpdating:outputURL)
+            FileManager.default.createFile(atPath:errorURL.path,contents:nil)
+            defer { try? FileManager.default.removeItem(at:outputURL); try? FileManager.default.removeItem(at:errorURL) }
+            let outputFile = try FileHandle(forWritingTo:outputURL)
+            let errorFile = try FileHandle(forWritingTo:errorURL)
             process.executableURL = URL(fileURLWithPath:"/bin/zsh")
             process.arguments = ["-c", "cd /tmp && exec \"$1\" \"$2\" call \"$3\" \"$4\" --home \"$5\"", "agentbase-skill", runtime.node, "\(runtime.source)/bin/agentbase.mjs", tool, payload, home]
             process.environment = ["HOME":NSHomeDirectory(),"PATH":"/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin","LANG":"C.UTF-8","TMPDIR":FileManager.default.temporaryDirectory.path,"PWD":"/tmp"]
-            process.standardOutput = outputFile; process.standardError = outputFile
-            try process.run(); process.waitUntilExit(); outputFile.synchronizeFile(); try outputFile.seek(toOffset:0)
-            let output = outputFile.readDataToEndOfFile(); try outputFile.close()
-            guard process.terminationStatus == 0 else { throw NSError(domain:"Skills", code:Int(process.terminationStatus), userInfo:[NSLocalizedDescriptionKey:String(data:output,encoding:.utf8) ?? "Skill operation failed."]) }
-            return output
+            process.standardOutput = outputFile; process.standardError = errorFile
+            try process.run(); process.waitUntilExit()
+            outputFile.synchronizeFile(); errorFile.synchronizeFile()
+            try outputFile.close(); try errorFile.close()
+            let stdout = try Data(contentsOf:outputURL)
+            let stderr = try Data(contentsOf:errorURL)
+            return try skillCommandOutput(stdout:stdout,stderr:stderr,terminationStatus:process.terminationStatus)
         }.value
     }
 }
