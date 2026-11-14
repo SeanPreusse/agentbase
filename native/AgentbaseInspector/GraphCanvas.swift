@@ -26,6 +26,11 @@ func graphColor(_ kind: String) -> Color {
     switch kind { case "project": return Color(red:0.88,green:0.90,blue:0.94); case "concept": return Color(red: 0.64, green: 0.60, blue: 0.97); case "task": return accent; case "resource", "dataset": return Color(red: 0.91, green: 0.70, blue: 0.38); case "analysis": return .pink; case "memory", "decision": return Color(red: 0.43, green: 0.70, blue: 0.96); case "plan": return .orange; default: return Color.gray }
 }
 struct GraphParticle { var point: CGPoint; var velocity: CGPoint = .zero }
+private struct IndexedGraphSpring {
+    let source: Int
+    let target: Int
+    let distance: Double
+}
 struct GraphCameraState: Equatable {
     let scale: CGFloat
     let center: CGPoint
@@ -56,6 +61,8 @@ enum GraphCameraPersistence {
 @MainActor final class GraphLayout: ObservableObject {
     @Published var particles: [String: GraphParticle] = [:]
     var nodes: [GraphNode] = []; var edges: [GraphEdge] = []; var heat = 1.0
+    private var nodeIndices: [String: Int] = [:]
+    private var springs: [IndexedGraphSpring] = []
     var pinned: String?; var gravity = 0.12; var gravityEnabled = true; var repulsion = 2200.0
     @Published var births: [String: TimeInterval] = [:]
     var edgeBirths: [GraphEdge: TimeInterval] = [:]
@@ -63,6 +70,12 @@ enum GraphCameraPersistence {
         let ids = Set(nodes.map(\.id)); let changed = Set(self.nodes.map(\.id)) != ids || Set(self.edges) != Set(edges)
         let hadExisting = !particles.isEmpty; let previousEdges = Set(self.edges)
         self.nodes = nodes; self.edges = edges
+        nodeIndices = Dictionary(uniqueKeysWithValues: nodes.enumerated().map { ($0.element.id, $0.offset) })
+        springs = edges.compactMap { edge in
+            guard let source = nodeIndices[edge.source], let target = nodeIndices[edge.target] else { return nil }
+            let distance = edge.relation == "contains" ? 180.0 : edge.relation == "child" ? 100.0 : 135.0
+            return IndexedGraphSpring(source: source, target: target, distance: distance)
+        }
         var updated = particles.filter { ids.contains($0.key) }
         var hierarchy: [String: GraphEdge] = [:]
         var adjacency: [String:[String]] = [:]
@@ -124,7 +137,6 @@ enum GraphCameraPersistence {
         guard heat > 0.015, !nodes.isEmpty else { return }
         var values = nodes.map { particles[$0.id] ?? GraphParticle(point: .zero) }
         var forces = Array(repeating: CGPoint.zero, count: nodes.count)
-        let index = Dictionary(uniqueKeysWithValues: nodes.enumerated().map { ($0.element.id, $0.offset) })
         for i in nodes.indices {
             for j in nodes.indices where j > i {
                 var dx = values[i].point.x - values[j].point.x, dy = values[i].point.y - values[j].point.y
@@ -141,11 +153,11 @@ enum GraphCameraPersistence {
                 forces[i].y -= values[i].point.y * gravity * (nodes[i].kind == "project" ? 0.12 : 0.04)
             }
         }
-        for edge in edges {
-            guard let a = index[edge.source], let b = index[edge.target] else { continue }
+        for spring in springs {
+            let a = spring.source, b = spring.target
             let dx = values[b].point.x - values[a].point.x, dy = values[b].point.y - values[a].point.y
-            let distance = max(1, hypot(dx,dy)); let target = edge.relation == "contains" ? 180.0 : edge.relation == "child" ? 100.0 : 135.0
-            let force = (distance - target) * 0.015
+            let distance = max(1, hypot(dx,dy))
+            let force = (distance - spring.distance) * 0.015
             forces[a].x += dx / distance * force; forces[a].y += dy / distance * force
             forces[b].x -= dx / distance * force; forces[b].y -= dy / distance * force
         }
