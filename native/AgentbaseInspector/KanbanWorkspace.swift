@@ -5,7 +5,7 @@ struct WorkspaceViewToggle: View {
     var body: some View {
         Picker("View",selection:Binding(get:{model.viewMode},set:{model.setViewMode($0)})) {
             Text("Graph").tag("Graph")
-            Text("Kanban").tag("Kanban")
+            Text("Tasks").tag("Kanban")
             Text("Skills").tag("Skills")
         }.pickerStyle(.segmented).labelsHidden().frame(width:205).help("Switch between graph, task board, and skill catalog")
     }
@@ -45,12 +45,12 @@ struct KanbanWorkspace: View {
                         Text("All Projects").tag(Inspector.allProjectsID)
                         if let id=model.projectID,id != Inspector.allProjectsID,!model.projects.contains(where:{$0.id==id}) { Text("Project unavailable").tag(id) }
                         ForEach(model.projects) { Text($0.displayName).tag($0.id) }
-                    }.labelsHidden().frame(maxWidth:180)
+                    }.pickerStyle(.menu).frame(maxWidth:220)
                     WorkspaceViewToggle(model:model)
                     RecentChangesButton(model:model)
                     ConnectionsButton(model:model.connections)
                     Spacer()
-                    Picker("Task view",selection:$model.boardFilter) {ForEach(["All","Open","Needs attention","Done"],id:\.self){Text($0).tag($0)}}.labelsHidden().frame(width:150)
+                    Picker("Status",selection:$model.boardFilter) {ForEach(["All","Open","Needs attention","Done"],id:\.self){Text($0).tag($0)}}.pickerStyle(.menu).frame(width:180).help("All includes tasks in every status; choose a project to show one workspace or All Projects to combine them.")
                     TextField("Search tasks",text:$model.boardQuery).textFieldStyle(.roundedBorder).frame(width:200)
                     Menu {
                         Button("Toggle full screen") {NSApp.keyWindow?.toggleFullScreen(nil)}
@@ -106,7 +106,7 @@ struct KanbanWorkspace: View {
     func card(_ task: Entry) -> some View {
         Button {model.openRecord(task.id,kind:"task")} label:{
             VStack(alignment:.leading,spacing:10) {
-                if model.isAllProjects {Text(model.projectName(for:task.project_id)).font(.caption2.weight(.semibold)).foregroundStyle(accent)}
+                Text(model.projectName(for:task.project_id)).font(.caption2.weight(.semibold)).foregroundStyle(accent).lineLimit(1).help("Project: \(model.projectName(for:task.project_id))")
                 if !task.text("parent_task_id").isEmpty {
                     Label("Subtask of \(parentTitle(for:task))",systemImage:"arrow.turn.down.right")
                         .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
