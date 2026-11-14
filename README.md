@@ -2,7 +2,7 @@
 
 **Local-first storage and memory for AI agents.** Keep project knowledge, tasks, data, and analysis together so work can pick up again in a fresh session.
 
-AgentBase is an MCP server, Codex plugin, and macOS inspector for persistent project state. Its local SQLite store keeps knowledge and work history; DuckDB powers sandboxed SQL analysis over imported project data.
+AgentBase is an MCP server, Codex plugin, and macOS inspector for persistent project state. Its local SQLite store keeps knowledge and work history; DuckDB powers sandboxed SQL analysis over imported project data. Claude Code can connect through MCP.
 
 ## App preview
 
@@ -21,7 +21,7 @@ AgentBase does not call a model or send project data to a hosted service. The MC
 
 ## Quick start
 
-Requires Node.js 22.22 or newer and Codex.
+Requires Node.js 22.22 or newer and Codex or Claude Code.
 
 ```sh
 git clone https://github.com/SeanPreusse/agentbase.git
@@ -30,7 +30,7 @@ npm ci
 npm run plugin:up
 ```
 
-Start a fresh Codex session to load the plugin. On macOS 14 or newer, `npm run ui` builds and opens the inspector.
+Start a fresh Codex session to load the plugin. In the macOS inspector, open Connections to install AgentBase for Claude Code. `npm run ui` builds and opens the inspector on macOS 14 or newer.
 
 ## Contribute
 

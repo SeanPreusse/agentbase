@@ -8,8 +8,8 @@ import { basename, join, resolve } from 'node:path';
 
 const exec = promisify(execFile);
 const PLUGIN = 'agentbase@agentbase-local';
-export interface ConnectionOptions { source: string; codex?: string; codexHome?: string; node?: string; workspace?: string; }
-export interface ConnectionState { codex_available: boolean; installed: boolean; enabled: boolean; version?: string; install_available: boolean; message: string; reconnect_required: boolean; tool_count?: number; codex_tool_count?: number; codex_skill_count?: number; checked_workspace?: string; checked_at?: string; backup?: string; }
+export interface ConnectionOptions { source: string; codex?: string; claude?: string; codexHome?: string; node?: string; workspace?: string; home?: string; }
+export interface ConnectionState { codex_available?: boolean; claude_available?: boolean; installed: boolean; enabled: boolean; version?: string; install_available: boolean; message: string; reconnect_required: boolean; tool_count?: number; codex_tool_count?: number; codex_skill_count?: number; checked_workspace?: string; checked_at?: string; backup?: string; }
 
 // Bounded local protocol client. No turns, prompts, credentials, or approval changes.
 async function rpc(command: string, args: string[], env: NodeJS.ProcessEnv, cwd: string) {
@@ -104,5 +104,64 @@ export class CodexConnection {
       return {...after,backup,reconnect_required:true,message:wanted?'Enabled. Reconnect Codex or start a new session to load Agentbase.':'Disabled for new sessions. Reconnect existing sessions to unload Agentbase. Your project memory is retained.'};
     }catch(error){throw new Error(`${(error as Error).message}${backup?` Settings backup: ${backup}`:''}`);}
     finally{lock.exec('ROLLBACK;');lock.close();}
+  }
+}
+
+export class ClaudeCodeConnection {
+  readonly claude: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly home: string;
+  constructor(readonly options: ConnectionOptions) {
+    this.claude = options.claude ?? 'claude';
+    this.env = { ...process.env };
+    this.home = resolve(options.home ?? process.env.AGENTBASE_HOME ?? join(homedir(), '.local/share/agentbase'));
+  }
+  private async sourceAvailable() {
+    try { await readFile(join(this.options.source, 'bin/agentbase.mjs')); return true; }
+    catch { return false; }
+  }
+  private async listing() {
+    const { stdout } = await exec(this.claude, ['mcp', 'list'], { env: this.env, cwd: homedir(), timeout: 25000, maxBuffer: 2 * 1024 * 1024 });
+    const line = stdout.split(/\r?\n/u).find(value => /^\s*agentbase\s*:/iu.test(value));
+    return line?.trim();
+  }
+  private health(line?: string) {
+    return line?.match(/\b(?:failed|error|pending approval|needs authentication|disabled|not connected|connected)\b/iu)?.[0];
+  }
+  async status(): Promise<ConnectionState> {
+    const install_available = await this.sourceAvailable();
+    try {
+      const line = await this.listing();
+      const health = this.health(line);
+      return { claude_available: true, installed: !!line, enabled: !!line, install_available, message: !line ? 'Not installed' : health ? health.replace(/\b\w/gu, char => char.toUpperCase()) : 'Installed', reconnect_required: false };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { claude_available: false, installed: false, enabled: false, install_available, message: 'Claude Code not found', reconnect_required: false };
+      throw new Error('Could not read Claude Code MCP settings. Check your Claude Code installation.');
+    }
+  }
+  async perform(action: 'status' | 'install' | 'remove' | 'check'): Promise<ConnectionState> {
+    const before = await this.status();
+    if (action === 'status' || before.claude_available !== true) return before;
+    if (action === 'install') {
+      if (!before.install_available) throw new Error('AgentBase server files are unavailable. Rebuild the inspector package.');
+      if (before.installed) throw new Error('AgentBase is already configured in Claude Code. Refresh to check its status.');
+      const node = this.options.node ?? process.execPath;
+      const command = join(this.options.source, 'bin/agentbase.mjs');
+      await exec(this.claude, ['mcp', 'add', '--transport', 'stdio', '--scope', 'user', 'agentbase', '--', node, command, 'serve', '--home', this.home], { env: this.env, cwd: homedir(), timeout: 25000, maxBuffer: 2 * 1024 * 1024 });
+      const after = await this.status();
+      if (!after.installed) throw new Error('Claude Code did not confirm the AgentBase MCP server.');
+      return { ...after, reconnect_required: true, message: 'Installed · reconnect Claude Code' };
+    }
+    if (!before.installed) throw new Error('Install AgentBase in Claude Code first.');
+    if (action === 'remove') {
+      await exec(this.claude, ['mcp', 'remove', 'agentbase', '--scope', 'user'], { env: this.env, cwd: homedir(), timeout: 25000, maxBuffer: 2 * 1024 * 1024 });
+      const after = await this.status();
+      return { ...after, reconnect_required: true, message: after.installed ? 'Removed user install · another scope still defines AgentBase' : 'Removed · AgentBase data is kept' };
+    }
+    const line = await this.listing();
+    if (!line) throw new Error('Claude Code could not find the AgentBase MCP server.');
+    const health = this.health(line);
+    if (health && /^(?:failed|error|pending approval|needs authentication|disabled|not connected)$/iu.test(health)) throw new Error(`Claude Code reports AgentBase is ${health.toLowerCase()}.`);
+    return { ...before, checked_at: new Date().toISOString() };
   }
 }

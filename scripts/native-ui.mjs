@@ -25,7 +25,8 @@ try {
   execFileSync('iconutil', ['-c', 'icns', '-o', join(resources, 'AgentBase.icns'), iconset], { stdio: 'inherit' });
 } finally { await rm(iconTemporary, { recursive: true, force: true }); }
 let codex='codex';try{codex=execFileSync('which',['codex'],{encoding:'utf8'}).trim();}catch{}
-await writeFile(join(resources, 'runtime.json'), JSON.stringify({ node: process.execPath, source: root, codex }));
+let claude='claude';try{claude=execFileSync('which',['claude'],{encoding:'utf8'}).trim();}catch{}
+await writeFile(join(resources, 'runtime.json'), JSON.stringify({ node: process.execPath, source: root, codex, claude }));
 const { version } = JSON.parse(await (await import('node:fs/promises')).readFile(join(root, 'package.json'), 'utf8'));
 await writeFile(join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

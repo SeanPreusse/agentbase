@@ -35,7 +35,7 @@ try {
   mcp.mcpServers.agentbase.command = './runtime/node';
   mcp.mcpServers.agentbase.args = ['./bin/agentbase.mjs', 'serve'];
   await writeFile(join(bundledPackage, 'mcp.json'), JSON.stringify(mcp, null, 2) + '\n');
-  await writeFile(join(resources, 'runtime.json'), JSON.stringify({ node: 'package/runtime/node', source: 'package', codex: 'codex', autoInstall: 'true' }) + '\n');
+  await writeFile(join(resources, 'runtime.json'), JSON.stringify({ node: 'package/runtime/node', source: 'package', codex: 'codex', claude: 'claude', autoInstall: 'true' }) + '\n');
   await writeFile(join(resources, 'Distribution.txt'), 'AgentBase for macOS 14 or newer. This build includes Node.js and the AgentBase runtime. It is locally signed but not Apple notarized.\n');
   execFileSync('codesign', ['--force', '--sign', '-', join(bundledPackage, 'runtime', 'node')], { stdio: 'inherit' });
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'inherit' });

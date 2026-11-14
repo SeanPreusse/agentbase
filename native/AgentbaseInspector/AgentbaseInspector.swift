@@ -90,6 +90,7 @@ struct Snapshot: Decodable {
         if let i = args.firstIndex(of:"--root"), args.count > i+1 { launchRoot = args[i+1] }
         else {launchRoot = environment["AGENTBASE_ROOT"]}
         projectID = launchRoot == nil ? Self.allProjectsID : nil
+        connections.setHome(home)
         connections.setWorkspace(launchRoot)
     }
     func start() {
@@ -251,7 +252,7 @@ struct Snapshot: Decodable {
     func focusChanged() { if !paused { start() } }
     func chooseStore() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.prompt = "Inspect store"
-        if panel.runModal() == .OK, let url = panel.url { launchRoot = nil; resetNavigation(); home = url.path; projectID = preferences.dictionary(forKey: "projects")?[home] as? String; connections.setWorkspace(nil); selectedID = nil; snapshot = nil; projects = []; start() }
+        if panel.runModal() == .OK, let url = panel.url { launchRoot = nil; resetNavigation(); home = url.path; connections.setHome(home); projectID = preferences.dictionary(forKey: "projects")?[home] as? String; connections.setWorkspace(nil); selectedID = nil; snapshot = nil; projects = []; start() }
     }
     func matchesTask(_ entry: Entry) -> Bool {
         let status = entry.text("status")

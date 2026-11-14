@@ -23,27 +23,46 @@ func codexExecutable(_ configured: String, searchPath: String, home: String) -> 
     }
     return configured
 }
+func claudeExecutable(_ configured: String, searchPath: String) -> String {
+    guard configured == "claude" else {return configured}
+    for directory in searchPath.split(separator:":") {
+        let candidate=String(directory)+"/claude"
+        if FileManager.default.isExecutableFile(atPath:candidate) {return candidate}
+    }
+    return configured
+}
 
 struct ConnectionReply: Decodable {
     let ok: Bool; let error: String?
-    let codex_available: Bool?; let installed: Bool?; let enabled: Bool?; let version: String?
+    let codex_available: Bool?; let claude_available: Bool?; let installed: Bool?; let enabled: Bool?; let version: String?
     let install_available: Bool?; let message: String?; let reconnect_required: Bool?
     let tool_count: Int?; let codex_tool_count: Int?; let codex_skill_count: Int?; let checked_workspace: String?; let checked_at: String?; let backup: String?
 }
 @MainActor final class ConnectionsModel: ObservableObject {
     @Published var state: ConnectionReply?
+    @Published var claudeState: ConnectionReply?
     @Published var busy = false
     @Published var error: String?
     @Published var action = ""
     private(set) var workspaceRoot: String?
+    private(set) var storeHome = NSHomeDirectory()+"/.local/share/agentbase"
+    func setHome(_ path: String) {
+        guard storeHome != path else {return}
+        storeHome=path
+        state=nil
+        claudeState=nil
+        error=nil
+    }
     func setWorkspace(_ root: String?) {
         guard workspaceRoot != root else {return}
         workspaceRoot = root
         state = nil
+        claudeState = nil
         error = nil
     }
-    func apply(_ value: ConnectionReply) {
-        if value.ok {state=value;error=nil} else {error=value.error ?? "Setup could not complete."}
+    func apply(_ value: ConnectionReply, host: String) {
+        if value.ok {if host == "claude" {claudeState=value} else {state=value};error=nil}
+        else {error=value.error ?? "Setup could not complete."}
     }
     func startup() {
         guard let resources=Bundle.main.resourceURL,
@@ -52,21 +71,30 @@ struct ConnectionReply: Decodable {
               config["autoInstall"] == "true" else {return}
         run("status", automatically:true)
     }
-    func run(_ requested: String, automatically: Bool = false) {
-        guard !busy, ["status","install","enable","disable","check"].contains(requested) else {return}
+    func refreshAll() {run("status")}
+    func checkAll() {
+        if state?.installed == true {run("check")}
+        else if claudeState?.installed == true {run("check",host:"claude")}
+        else {refreshAll()}
+    }
+    func run(_ requested: String, host: String = "codex", automatically: Bool = false) {
+        let validActions = host == "claude" ? ["status","install","remove","check"] : ["status","install","enable","disable","check"]
+        guard !busy, validActions.contains(requested) else {return}
         guard let resources=Bundle.main.resourceURL,
               let data=try? Data(contentsOf:resources.appendingPathComponent("runtime.json")),
               let config=try? JSONSerialization.jsonObject(with:data) as? [String:String],
               let node=config["node"],let source=config["source"] else {error="Setup configuration missing. Rebuild the inspector.";return}
         busy=true;error=nil;action=requested
         let requestedWorkspace = workspaceRoot
+        let requestedHome = storeHome
         let process=Process();let output=Pipe();let errors=Pipe()
         let nodePath=bundledPath(node)
         process.executableURL=URL(fileURLWithPath:nodePath)
         var environment=ProcessInfo.processInfo.environment
         environment["PATH"]=[URL(fileURLWithPath:nodePath).deletingLastPathComponent().path,NSHomeDirectory()+"/.local/bin",NSHomeDirectory()+"/.codex/bin","/opt/homebrew/bin","/usr/local/bin",environment["PATH"] ?? "/usr/bin:/bin"].joined(separator:":")
         let codex=codexExecutable(config["codex"] ?? "codex",searchPath:environment["PATH"] ?? "",home:NSHomeDirectory())
-        process.arguments=[resources.appendingPathComponent("bridge/connections-main.js").path,requested,"--source",bundledPath(source),"--codex",codex]
+        let claude=claudeExecutable(config["claude"] ?? "claude",searchPath:environment["PATH"] ?? "")
+        process.arguments=[resources.appendingPathComponent("bridge/connections-main.js").path,requested,"--source",bundledPath(source),"--codex",codex,"--claude",claude,"--node",nodePath,"--host",host,"--home",storeHome]
         if let requestedWorkspace {process.arguments! += ["--workspace",requestedWorkspace]}
         process.environment=environment;process.standardOutput=output;process.standardError=errors
         errors.fileHandleForReading.readabilityHandler={handle in _=handle.availableData}
@@ -76,14 +104,17 @@ struct ConnectionReply: Decodable {
             let result=await Task.detached {let bytes=output.fileHandleForReading.readDataToEndOfFile();process.waitUntilExit();return bytes}.value
             timeout.cancel();errors.fileHandleForReading.readabilityHandler=nil
             guard let self else {return};self.busy=false;self.action=""
-            guard self.workspaceRoot == requestedWorkspace else {self.run("status");return}
+            guard self.workspaceRoot == requestedWorkspace, self.storeHome == requestedHome else {self.run("status");return}
             do {
                 let reply=try JSONDecoder().decode(ConnectionReply.self,from:result)
-                self.apply(reply)
+                self.apply(reply,host:host)
                 if reply.ok {
-                    if automatically && requested == "status" && reply.codex_available == true && reply.installed != true && reply.install_available == true {self.run("install",automatically:true)}
-                    else if requested == "status" && reply.installed == true && reply.enabled == true {self.run("check")}
-                    else if (requested == "install" || requested == "enable") && reply.enabled == true {self.run("check")}
+                    if host == "codex" {
+                        if automatically && requested == "status" && reply.codex_available == true && reply.installed != true && reply.install_available == true {self.run("install",automatically:true)}
+                        else if requested == "status" && reply.installed == true && reply.enabled == true {self.run("check")}
+                        else if (requested == "install" || requested == "enable") && reply.enabled == true {self.run("check")}
+                        else {self.run("status",host:"claude")}
+                    }
                 }
             }
             catch {self.error="Setup stopped without a valid result. Refresh to check the current settings."}
@@ -97,11 +128,11 @@ struct ConnectionsButton: View {
         Button {presented.toggle()} label:{Image(systemName:"puzzlepiece.extension")}
             .buttonStyle(.plain).help("Connections").accessibilityLabel("Connections")
             .popover(isPresented:$presented,arrowEdge:.bottom) {
-                VStack(alignment:.leading,spacing:16) {
+                VStack(alignment:.leading,spacing:13) {
                     HStack {Text("Connections").font(.headline);Spacer();if model.busy {ProgressView().controlSize(.small)}}
-                    HStack(spacing:12) {
-                        Image(systemName:"terminal").font(.title2).foregroundStyle(.secondary)
-                        VStack(alignment:.leading,spacing:4) {
+                    HStack(spacing:11) {
+                        Image(systemName:"terminal").font(.title3).foregroundStyle(.secondary).frame(width:22)
+                        VStack(alignment:.leading,spacing:3) {
                             Text("Codex").font(.system(size:13,weight:.semibold))
                             Text(status).font(.caption).foregroundStyle(.secondary)
                         }
@@ -112,17 +143,28 @@ struct ConnectionsButton: View {
                             Button("Install") {model.run("install")}.disabled(model.busy || model.state?.install_available != true)
                         }
                     }
-                    if let message=model.state?.message {Text(message).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)}
-                    if let error=model.error {Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled).fixedSize(horizontal:false,vertical:true)}
-                    Divider()
-                    HStack {
-                        Button("Check setup") {model.run("check")}.disabled(model.busy || model.state?.installed != true)
+                    HStack(spacing:11) {
+                        Image(systemName:"sparkle").font(.title3).foregroundStyle(Color(red:0.88,green:0.48,blue:0.31)).frame(width:22)
+                        VStack(alignment:.leading,spacing:3) {
+                            Text("Claude Code").font(.system(size:13,weight:.semibold))
+                            Text(claudeStatus).font(.caption).foregroundStyle(.secondary)
+                        }
                         Spacer()
-                        Button("Refresh") {model.run("status")}.disabled(model.busy)
-                    }.font(.caption)
-                    Text("User profile · Project policies may override this setting. Changes apply after reconnecting Codex. Switching off keeps your project memory.").font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
+                        if model.claudeState?.installed == true {
+                            Button("Remove") {model.run("remove",host:"claude")}.disabled(model.busy).help("Remove the AgentBase user-level MCP server from Claude Code")
+                        } else if model.claudeState?.claude_available == true {
+                            Button("Install") {model.run("install",host:"claude")}.disabled(model.busy || model.claudeState?.install_available != true)
+                        }
+                    }
+                    if let error=model.error {Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled).fixedSize(horizontal:false,vertical:true)}
+                    HStack {
+                        Button {model.checkAll()} label:{Image(systemName:"checkmark.circle")}.buttonStyle(.plain).help("Check setup")
+                        Spacer()
+                        Button {model.refreshAll()} label:{Image(systemName:"arrow.clockwise")}.buttonStyle(.plain).help("Refresh connections")
+                    }.font(.caption).disabled(model.busy)
+                    Text("Reconnect after changes · Your data stays in AgentBase.").font(.caption2).foregroundStyle(.secondary)
                     if let backup=model.state?.backup {DisclosureGroup("Settings backup") {Text(backup).font(.caption2.monospaced()).textSelection(.enabled)}}
-                }.padding(18).frame(width:340).onAppear {model.run("status")}
+                }.padding(16).frame(width:330).onAppear {model.refreshAll()}
             }
     }
     var status: String {
@@ -131,5 +173,11 @@ struct ConnectionsButton: View {
         if state.installed != true {return "Not installed"}
         let condition = state.enabled == true ? ((state.codex_tool_count ?? 0) > 0 ? "Tools verified" : "Enabled in settings") : "Disabled"
         return condition + (state.version.map {" · \($0)"} ?? "")
+    }
+    var claudeStatus: String {
+        guard let state=model.claudeState else {return model.busy ? "Checking…" : "Not checked"}
+        if state.claude_available != true {return "Claude Code CLI not found"}
+        if state.installed != true {return "Not installed"}
+        return state.message ?? "Installed"
     }
 }
