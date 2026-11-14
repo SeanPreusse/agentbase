@@ -1,6 +1,10 @@
 import SwiftUI
 
 private struct SkillCatalog: Decodable { let records: [Entry] }
+private struct SkillCatalogPage: Decodable {
+    let records: [Entry]
+    let total: Int
+}
 
 func decodeSkillCatalog(_ data: Data) throws -> [Entry] {
     try JSONDecoder().decode(SkillCatalog.self, from:data).records
@@ -93,9 +97,18 @@ final class SkillCatalogModel: ObservableObject {
         loading = true; busy = true
         Task {
             do {
-                let listed = try await call("skill_list", projectID: projectID, home: home, fields: ["status":"all", "limit":100, "offset":0])
-                guard revision == loadRevision else { return }
-                var records = try decodeSkillCatalog(listed)
+                var records: [Entry] = []
+                var offset = 0
+                var total = Int.max
+                while offset < total {
+                    let listed = try await call("skill_list", projectID: projectID, home: home, fields: ["status":"all", "limit":100, "offset":offset])
+                    guard revision == loadRevision else { return }
+                    let page = try JSONDecoder().decode(SkillCatalogPage.self, from: listed)
+                    total = page.total
+                    records.append(contentsOf: page.records)
+                    guard !page.records.isEmpty else { break }
+                    offset += page.records.count
+                }
                 var added = 0
                 let runtime = try runtimeConfig()
                 for item in bundled {
