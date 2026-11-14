@@ -136,7 +136,7 @@ export class Store {
   }
   index(record: RecordData) {
     this.db.prepare('DELETE FROM search_index WHERE id=?').run(record.id);
-    if (record.body.status !== 'forgotten') this.db.prepare('INSERT INTO search_index VALUES (?,?,?)')
+    if (!['forgotten', 'rejected'].includes(record.body.status)) this.db.prepare('INSERT INTO search_index VALUES (?,?,?)')
       .run(record.id, record.project_id, JSON.stringify(record.body));
   }
   event(record: RecordData, action: string, actor: string) {
@@ -178,7 +178,11 @@ export class Store {
     const complete = terms.join(' AND ');
     return this.db.prepare(`SELECT r.* FROM search_index s JOIN records r ON r.id=s.id
       WHERE search_index MATCH ? AND r.project_id=? AND (? IS NULL OR r.kind=?)
-      ORDER BY CASE WHEN r.id IN (SELECT id FROM search_index WHERE search_index MATCH ? AND project_id=?) THEN 0 ELSE 1 END,
+        AND COALESCE(json_extract(r.body,'$.status'),'') NOT IN ('forgotten','rejected')
+      ORDER BY CASE WHEN r.kind IN ('memory','decision') THEN
+          CASE COALESCE(json_extract(r.body,'$.status'),'active') WHEN 'active' THEN 0 WHEN 'disputed' THEN 1 WHEN 'stale' THEN 2 ELSE 3 END
+        ELSE 0 END,
+        CASE WHEN r.id IN (SELECT id FROM search_index WHERE search_index MATCH ? AND project_id=?) THEN 0 ELSE 1 END,
         rank, r.updated_at DESC, r.id LIMIT ? OFFSET ?`)
       .all(match, projectId, kind ?? null, kind ?? null, complete, projectId, limit, offset).map(row => this.decode(row));
   }

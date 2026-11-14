@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 private struct SkillCatalog: Decodable { let records: [Entry] }
 private struct SkillCatalogPage: Decodable {
@@ -20,6 +21,15 @@ func skillCommandOutput(stdout: Data, stderr: Data, terminationStatus: Int32) th
         throw NSError(domain:"Skills",code:4,userInfo:[NSLocalizedDescriptionKey:"Skill command returned no JSON data."])
     }
     return stdout
+}
+
+func skillInstructions(from content: String) -> String {
+    let lines = content.components(separatedBy:.newlines)
+    if lines.first?.trimmingCharacters(in:.whitespaces) == "---",
+       let end = lines.dropFirst().firstIndex(where:{$0.trimmingCharacters(in:.whitespaces) == "---"}) {
+        return lines.dropFirst(end+1).joined(separator:"\n").trimmingCharacters(in:.whitespacesAndNewlines)
+    }
+    return content.trimmingCharacters(in:.whitespacesAndNewlines)
 }
 
 struct SkillTemplate: Identifiable {
@@ -68,6 +78,7 @@ final class SkillCatalogModel: ObservableObject {
     private var templateRoot: String?
     private var loadRevision = 0
     private var loading = false
+    private var loadedScope: String?
     private let bundled: [(slug: String, title: String, description: String, triggers: [String], tags: [String], applies: [String])] = [
         ("agentbase-resume", "Continue project work", "Track and resume substantive project work, including research, reviews, audits, investigations, and coding, using project memory, tasks, and handoffs.", ["continue project", "resume work", "switch workspace", "review a project", "research a project", "audit a project", "investigate a project"], ["continuity", "handoff", "tasks", "planning", "review", "research", "audit", "investigation"], ["project work", "coding", "planning", "research", "reviews", "audits", "investigations"]),
         ("agentbase-analyse", "Analyze local data", "Import and analyze CSV, JSON, JSONL, or Parquet project data with Agentbase.", ["analyze data", "import csv", "inspect dataset"], ["csv", "json", "jsonl", "parquet", "analysis"], ["data analysis", "project data"]),
@@ -75,6 +86,13 @@ final class SkillCatalogModel: ObservableObject {
     ]
 
     var selected: Entry? { skills.first { $0.id == selectedID } }
+    var categories: [String] {
+        let values = Set(skills.map { $0.text("category").isEmpty ? "General" : $0.text("category") })
+        return ["All"] + values.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+    var editorCategories: [String] {
+        Array(Set(SkillTemplate.categories + categories.filter {$0 != "All"})).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
     var filtered: [Entry] {
         return skills.filter { skill in
             let category = skill.text("category").isEmpty ? "General" : skill.text("category")
@@ -92,7 +110,9 @@ final class SkillCatalogModel: ObservableObject {
         guard !busy || loading else { return }
         loadRevision += 1
         let revision = loadRevision
-        skills = []; selectedID = nil; error = nil; message = nil
+        let scope = home + "|" + (projectID ?? "")
+        if loadedScope != scope { skills = []; selectedID = nil; selectedCategory = "All"; loadedScope = scope }
+        error = nil; message = nil
         guard let projectID, projectID != Inspector.allProjectsID else { loading = false; busy = false; return }
         loading = true; busy = true
         Task {
@@ -124,7 +144,8 @@ final class SkillCatalogModel: ObservableObject {
                 }
                 guard revision == loadRevision else { return }
                 skills = records.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-                if selectedID == nil || !skills.contains(where: { $0.id == selectedID }) { selectedID = skills.first?.id }
+                if !categories.contains(selectedCategory) { selectedCategory = "All" }
+                selectVisibleSkill()
                 if added > 0 { message = "Added \(added) bundled skills." }
             } catch { if revision == loadRevision { self.error = error.localizedDescription } }
             if revision == loadRevision { loading = false; busy = false }
@@ -330,17 +351,13 @@ struct SkillWorkspace: View {
     var body: some View {
         VStack(spacing:0) {
             HStack(spacing:12) {
-                Picker("Project",selection:Binding(get:{model.projectID ?? model.snapshot?.selected_project_id ?? ""},set:{model.selectProject($0)})) {
-                    Text("All Projects").tag(Inspector.allProjectsID)
-                    ForEach(model.projects) { Text($0.displayName).tag($0.id) }
-                }.labelsHidden().frame(maxWidth:180).disabled(catalog.editing)
-                WorkspaceViewToggle(model:model)
+                WorkspaceNavigation(model:model,projectDisabled:catalog.editing)
                 Spacer()
                 Button { catalog.load(home:model.home,projectID:activeProjectID) } label: { Image(systemName:"arrow.clockwise") }.help("Refresh skills").disabled(catalog.busy || needsProject)
                 Button { showingTemplates = true } label: { Label("New skill",systemImage:"plus") }
                     .buttonStyle(.borderedProminent).disabled(needsProject || model.currentProject == nil || catalog.busy)
                     .popover(isPresented:$showingTemplates,arrowEdge:.bottom) { templateDialog }
-            }.padding(.horizontal,20).padding(.top,34).padding(.bottom,16)
+            }.padding(.leading,30).padding(.trailing,20).padding(.top,43).padding(.bottom,16)
             Divider()
             if catalog.editing { editor }
             else { browse }
@@ -355,10 +372,7 @@ struct SkillWorkspace: View {
     private var templateDialog: some View {
         VStack(alignment:.leading,spacing:16) {
             HStack {
-                VStack(alignment:.leading,spacing:4) {
-                    Text("Create a skill").font(.title2.bold())
-                    Text("Choose a starting point, then edit its instructions.").font(.caption).foregroundStyle(.secondary)
-                }
+                Text("New skill").font(.title2.bold())
                 Spacer()
                 Button("Cancel") { showingTemplates = false }.keyboardShortcut(.cancelAction)
             }
@@ -394,7 +408,7 @@ struct SkillWorkspace: View {
                     }
                 }
             }.frame(height:300)
-            Text("The finished skill is saved in this project’s .agents/skills folder and added to its catalog.")
+            Text("Creates a SKILL.md in this project.")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(24).frame(width:610)
     }
@@ -417,33 +431,56 @@ struct SkillWorkspace: View {
                 }
                 .frame(maxWidth:.infinity,maxHeight:.infinity)
             } else {
-            HStack(spacing:0) {
-            VStack(spacing:12) {
-                TextField("Find a skill",text:$catalog.search).textFieldStyle(.roundedBorder)
-                Picker("Category",selection:$catalog.selectedCategory) {
-                    Text("All categories").tag("All")
-                    ForEach(SkillTemplate.categories,id:\.self) { Text($0).tag($0) }
-                }.pickerStyle(.menu).frame(maxWidth:.infinity,alignment:.leading)
-                if catalog.filtered.isEmpty {
-                    ContentUnavailableView(catalog.skills.isEmpty ? "No skills yet" : "No matches", systemImage:"sparkles", description:Text(catalog.skills.isEmpty ? "Add a skill to this project to get started." : "Try a different search or category."))
-                } else {
-                    List(selection:$catalog.selectedID) {
-                        ForEach(catalog.filtered) { skill in
-                            VStack(alignment:.leading,spacing:4) {
-                                Text(skill.title).font(.headline).lineLimit(1)
-                                Text(skill.text("description")).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                HStack { StatusBadge(value:skill.text("status")); Text(skill.text("category").isEmpty ? "General" : skill.text("category")).font(.caption2).foregroundStyle(.secondary); Text("\(catalog.listCount(skill))").font(.caption2).foregroundStyle(.tertiary) }
-                            }.padding(.vertical,5).tag(skill.id)
+                HStack(spacing:0) {
+                    VStack(alignment:.leading,spacing:12) {
+                        TextField("Search skills",text:$catalog.search)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Search skills")
+                        HStack {
+                            Picker("Category",selection:$catalog.selectedCategory) {
+                                ForEach(catalog.categories,id:\.self) { category in
+                                    Text(category == "All" ? "All categories" : category).tag(category)
+                                }
+                            }.pickerStyle(.menu)
+                            Spacer(minLength:8)
+                            Text("\(catalog.filtered.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                         }
-                    }.listStyle(.sidebar)
+                        if catalog.filtered.isEmpty {
+                            Group {
+                                if catalog.busy && catalog.skills.isEmpty { ProgressView("Loading skills…") }
+                                else { ContentUnavailableView(catalog.skills.isEmpty ? "No skills yet" : "No matches", systemImage:"sparkles", description:Text(catalog.skills.isEmpty ? "Add a skill to this project to get started." : "Try a different search or category.")) }
+                            }.frame(maxWidth:.infinity,maxHeight:.infinity)
+                        } else {
+                            ScrollView {
+                                LazyVStack(spacing:6) {
+                                    ForEach(catalog.filtered) { skill in
+                                        Button { catalog.selectedID = skill.id } label: {
+                                            VStack(alignment:.leading,spacing:5) {
+                                                HStack(alignment:.firstTextBaseline) {
+                                                    Text(skill.title).font(.system(size:14,weight:.semibold)).lineLimit(1)
+                                                    Spacer(minLength:4)
+                                                    if skill.text("status") == "disabled" { Image(systemName:"pause.circle").foregroundStyle(.secondary) }
+                                                }
+                                                Text(skill.text("description")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                            }
+                                            .frame(maxWidth:.infinity,alignment:.leading)
+                                            .padding(.horizontal,12).padding(.vertical,11)
+                                            .background(catalog.selectedID == skill.id ? Color.accentColor.opacity(0.19) : Color.white.opacity(0.035),in:RoundedRectangle(cornerRadius:9))
+                                            .overlay(RoundedRectangle(cornerRadius:9).stroke(catalog.selectedID == skill.id ? Color.accentColor.opacity(0.42) : Color.clear,lineWidth:1))
+                                            .contentShape(RoundedRectangle(cornerRadius:9))
+                                        }.buttonStyle(.plain).accessibilityAddTraits(catalog.selectedID == skill.id ? .isSelected : [])
+                                    }
+                                }.padding(.vertical,2)
+                            }
+                        }
+                    }.padding(18).frame(width:325)
+                    .background(Color.white.opacity(0.025))
+                    Divider()
+                    Group {
+                        if let skill=catalog.selected { detail(skill) }
+                        else { ContentUnavailableView("Select a skill",systemImage:"sparkles",description:Text("Browse the project catalog or add a skill.")) }
+                    }.frame(maxWidth:.infinity,maxHeight:.infinity)
                 }
-            }.padding(16).frame(width:310)
-            Divider()
-            Group {
-                if let skill=catalog.selected { detail(skill) }
-                else { ContentUnavailableView("Select a skill",systemImage:"sparkles",description:Text("Browse the project catalog or add a skill.")) }
-            }.frame(maxWidth:.infinity,maxHeight:.infinity)
-            }
             }
             Spacer(minLength:0)
             if let message=catalog.message { Text(message).font(.caption).foregroundStyle(.secondary).padding(12) }
@@ -452,25 +489,37 @@ struct SkillWorkspace: View {
     }
     private func detail(_ skill: Entry) -> some View {
         ScrollView {
-            VStack(alignment:.leading,spacing:22) {
+            VStack(alignment:.leading,spacing:20) {
                 HStack(alignment:.top) {
-                    VStack(alignment:.leading,spacing:8) { Text(skill.title).font(.largeTitle.bold()); HStack { StatusBadge(value:skill.text("status")); Text(skill.text("category").isEmpty ? "General" : skill.text("category")).font(.caption).foregroundStyle(.secondary) } }
-                    Spacer(); Button("Edit") { catalog.beginEdit(skill) }.buttonStyle(.bordered)
+                    VStack(alignment:.leading,spacing:8) {
+                        Text(skill.title).font(.title.bold()).textSelection(.enabled)
+                        if skill.text("status") == "disabled" { Text("Disabled").font(.caption).foregroundStyle(.secondary) }
+                    }
+                    Spacer(minLength:16)
+                    Button("Edit") { catalog.beginEdit(skill) }.buttonStyle(.bordered)
                 }
-                Text(skill.text("description")).font(.body).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
-                chipSection("Use when", values:catalog.values(skill,"triggers"))
-                chipSection("Tags", values:catalog.values(skill,"tags"))
-                chipSection("Applies to", values:catalog.values(skill,"applies_to"))
-                VStack(alignment:.leading,spacing:8) { Text("SOURCE").font(.caption.weight(.semibold)).foregroundStyle(.secondary); Text(skill.text("source")).font(.callout.monospaced()).textSelection(.enabled) }
+                Text(skill.text("description")).font(.body).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true).textSelection(.enabled)
+                let triggers = catalog.values(skill,"triggers")
+                if !triggers.isEmpty {
+                    VStack(alignment:.leading,spacing:8) {
+                        Text("Use when").font(.system(size:13,weight:.semibold)).foregroundStyle(.secondary)
+                        ForEach(Array(triggers.enumerated()),id:\.offset) { item in
+                            Text(item.element).font(.system(size:13)).textSelection(.enabled)
+                        }
+                    }
+                }
+                SkillSourceView(source:skill.text("source")).id(skill.id)
+                DisclosureGroup("Details") {
+                    VStack(alignment:.leading,spacing:12) {
+                        Text("Category: \(skill.text("category").isEmpty ? "General" : skill.text("category"))")
+                        let applies = catalog.values(skill,"applies_to")
+                        if !applies.isEmpty { Text("Applies to: \(applies.joined(separator:", "))") }
+                        let tags = catalog.values(skill,"tags")
+                        if !tags.isEmpty { Text("Tags: \(tags.joined(separator:", "))") }
+                    }.font(.caption).foregroundStyle(.secondary).padding(.top,8)
+                }.font(.system(size:13,weight:.medium))
                 if let error=catalog.error { Label(error,systemImage:"exclamationmark.triangle").font(.caption).foregroundStyle(.orange) }
-            }.frame(maxWidth:700,alignment:.leading).padding(32).frame(maxWidth:.infinity,alignment:.topLeading)
-        }
-    }
-    private func chipSection(_ title: String, values: [String]) -> some View {
-        VStack(alignment:.leading,spacing:9) {
-            Text(title.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            if values.isEmpty { Text("None").foregroundStyle(.tertiary) }
-            else { FlowChips(values:values) }
+            }.frame(maxWidth:760,alignment:.leading).padding(32).frame(maxWidth:.infinity,alignment:.topLeading)
         }
     }
     private var editor: some View {
@@ -478,15 +527,19 @@ struct SkillWorkspace: View {
             Section("Skill details") {
                 TextField("Name",text:$catalog.title)
                 TextField("Description",text:$catalog.description,axis:.vertical).lineLimit(2...4)
-                Picker("Category",selection:$catalog.category) { ForEach(SkillTemplate.categories,id:\.self) { Text($0).tag($0) } }
+                Picker("Category",selection:$catalog.category) { ForEach(catalog.editorCategories,id:\.self) { Text($0).tag($0) } }
                 Picker("Status",selection:$catalog.status) { Text("Active").tag("active"); Text("Disabled").tag("disabled") }
                 if catalog.createsFile { Text("A SKILL.md file will be created in this project’s .agents/skills folder.").font(.caption).foregroundStyle(.secondary) }
-                else { TextField("Source reference",text:$catalog.source) }
+                else {
+                    TextField("Source reference",text:$catalog.source)
+                    Text("Edit instructions in the source file.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             if catalog.createsFile {
                 Section("Instructions") {
                     TextField("What should the agent do?",text:$catalog.instructions,axis:.vertical).lineLimit(10...18)
-                    Text("Edit the template to match this project. These instructions are saved in SKILL.md.").font(.caption).foregroundStyle(.secondary)
+                    Text("Saved in SKILL.md.").font(.caption).foregroundStyle(.secondary)
                 }
             }
             Section("Matching") {
@@ -500,16 +553,60 @@ struct SkillWorkspace: View {
     }
 }
 
-private struct FlowChips: View {
-    let values: [String]
+private struct SkillSourceView: View {
+    let source: String
+    @State private var instructions: String?
+    @State private var readError: String?
+    @State private var expanded = false
+    private var fileURL: URL? { source.hasPrefix("/") ? URL(fileURLWithPath:source) : nil }
     var body: some View {
-        LazyVGrid(columns:[GridItem(.adaptive(minimum:110),alignment:.leading)],alignment:.leading,spacing:8) {
-            ForEach(values,id:\.self) { value in Text(value).font(.caption).padding(.horizontal,10).padding(.vertical,6).background(.white.opacity(0.08),in:Capsule()) }
+        DisclosureGroup(isExpanded:$expanded) {
+            VStack(alignment:.leading,spacing:12) {
+                if let instructions {
+                    Text(instructions.isEmpty ? "No instructions in this file." : instructions)
+                        .font(.system(size:12,design:.monospaced)).foregroundStyle(.secondary)
+                        .textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading)
+                } else if let readError {
+                    Text(readError).font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ProgressView("Loading…").controlSize(.small)
+                }
+                Divider()
+                Text(source.isEmpty ? "No source" : source)
+                    .font(.system(size:11,design:.monospaced)).foregroundStyle(.tertiary)
+                    .textSelection(.enabled).fixedSize(horizontal:false,vertical:true)
+                HStack {
+                if let fileURL {
+                    Button("Open file") { NSWorkspace.shared.open(fileURL) }.buttonStyle(.borderless)
+                }
+                Button("Copy path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(source,forType:.string)
+                }.buttonStyle(.borderless).disabled(source.isEmpty)
+                }
+            }
+            .padding(.top,10)
+        } label: {
+            Text("Instructions").font(.system(size:13,weight:.medium))
         }
+            .task(id:source) {
+                instructions = nil; readError = nil
+                guard let fileURL else { readError = "This reference is not a local file."; return }
+                do {
+                    let content = try await Task.detached {
+                        let attributes = try FileManager.default.attributesOfItem(atPath:fileURL.path)
+                        if (attributes[.size] as? NSNumber)?.intValue ?? 0 > 256_000 {
+                            throw NSError(domain:"Skills",code:5,userInfo:[NSLocalizedDescriptionKey:"The skill file is too large to preview."])
+                        }
+                        return try String(contentsOf:fileURL,encoding:.utf8)
+                    }.value
+                    guard !Task.isCancelled else { return }
+                    instructions = skillInstructions(from:content)
+                } catch { readError = "Instructions unavailable: \(error.localizedDescription)" }
+            }
     }
 }
 
 private extension SkillCatalogModel {
     func values(_ entry: Entry,_ key: String) -> [String] { entry.body[key]?.raw as? [String] ?? [] }
-    func listCount(_ entry: Entry) -> String { "\(values(entry,"triggers").count) triggers" }
 }

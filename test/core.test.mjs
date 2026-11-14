@@ -231,6 +231,48 @@ test('retry is idempotent, changed arguments conflict, versions protect updates'
   await assert.rejects(f.write('task_update', { id: a.id, expected_version: 1, title: 'Overwritten' }), { code: 'VERSION_CONFLICT' });
 });
 
+test('accepted plan milestones become linked tasks atomically without duplicate retries', async t => {
+  const f = await fixture(t);
+  const plan = await f.write('plan_save', { goal: 'Ship a reliable import', milestones: [
+    { title: 'Define identity', acceptance: 'Customer and invoice number identify each invoice.' },
+    { title: 'Implement import', acceptance: 'Repeated imports are idempotent.' },
+    { title: 'Review release', acceptance: 'Checks pass and the change is documented.' },
+  ] });
+  const args = { plan_id: plan.id, expected_version: plan.version, confirmed_by_user: true,
+    milestone_indices: [0, 2], dependencies: [{ milestone_index: 2, depends_on_index: 0 }], request_id: 'accepted-plan' };
+  const result = await f.write('plan_tasks_create', args);
+  assert.equal(result.created_count, 2);
+  assert.deepEqual(result.tasks.map(item => item.milestone_index), [0, 2]);
+  const first = await f.call('record_get', { id: result.tasks[0].task_id });
+  const last = await f.call('record_get', { id: result.tasks[1].task_id });
+  assert.equal(first.body.plan_id, plan.id);
+  assert.equal(first.body.plan_milestone_index, 0);
+  assert.deepEqual(first.body.acceptance, [plan.body.milestones[0].acceptance]);
+  assert.equal(last.body.status, 'ready');
+  assert.deepEqual(last.dependencies, [first.id]);
+  assert.equal(last.body.sources[0].reference, plan.id);
+  assert.deepEqual(await f.write('plan_tasks_create', args), result);
+  await assert.rejects(f.write('plan_tasks_create', { ...args, request_id: 'another-request' }), { code: 'PLAN_MILESTONE_EXISTS' });
+  assert.equal(f.store.all(f.project.id, 'task').length, 2);
+
+  await assert.rejects(f.write('plan_tasks_create', { plan_id: plan.id, expected_version: plan.version,
+    confirmed_by_user: true, milestone_indices: [1], dependencies: [{ milestone_index: 1, depends_on_index: 0 }] }),
+  { code: 'INVALID_DEPENDENCY' });
+  assert.equal(f.store.all(f.project.id, 'task').length, 2);
+  await assert.rejects(f.write('plan_tasks_create', { plan_id: plan.id, expected_version: plan.version,
+    confirmed_by_user: true, milestone_indices: [1, 1] }), { code: 'INVALID_MILESTONE' });
+  await assert.rejects(f.write('plan_tasks_create', { plan_id: plan.id, expected_version: plan.version,
+    milestone_indices: [1] }));
+  const otherRoot = join(f.directory, 'other-plan-project'); await mkdir(otherRoot);
+  const other = await f.service.call('project_open', { root: otherRoot });
+  await assert.rejects(f.service.call('plan_tasks_create', { project_id: other.id, actor: 'codex-a', request_id: randomUUID(),
+    plan_id: plan.id, expected_version: plan.version, confirmed_by_user: true }), { code: 'NOT_FOUND' });
+  const revised = await f.write('plan_save', { id: plan.id, expected_version: plan.version, goal: plan.body.goal, milestones: plan.body.milestones });
+  assert.equal(revised.version, 2);
+  await assert.rejects(f.write('plan_tasks_create', { plan_id: plan.id, expected_version: plan.version,
+    confirmed_by_user: true, milestone_indices: [1] }), { code: 'VERSION_CONFLICT' });
+});
+
 test('dependencies reject cycles and rolled-back writes leave no partial task', async t => {
   const f = await fixture(t);
   const a = await f.write('task_create', taskInput);
@@ -291,6 +333,40 @@ test('multiword retrieval ranks complete matches before partial matches without 
   assert.ok([...first.records, ...second.records].some(r => partial.some(p => p.id === r.id)));
   const context = await f.call('context_get', { query: 'quartz nebula', max_chars: 2000 });
   assert.equal(context.included_ids[0], complete.id);
+});
+
+test('retrieval and context prefer current focused memory and explain selection', async t => {
+  const f = await fixture(t);
+  const task = await f.write('task_create', { ...taskInput, title: 'Fix invoice importer' });
+  let stale = await f.write('memory_record', { kind: 'fact', title: 'Invoice importer identity',
+    content: 'Invoice importer uses invoice number alone.', source: 'old spec', epistemic_status: 'observed' });
+  stale = await f.write('memory_update', { id: stale.id, expected_version: stale.version, status: 'stale', reason: 'Partner changed identifiers.' });
+  const current = await f.write('memory_record', { kind: 'constraint', title: 'Invoice importer identity',
+    content: 'Invoice importer identity uses customer id and invoice number.', source: 'partner requirement', epistemic_status: 'user_stated',
+    scope: 'task', task_id: task.id });
+  const result = await f.call('search', { query: 'invoice importer identity', kind: 'memory' });
+  assert.equal(result.records[0].id, current.id);
+  assert.ok(result.records.some(record => record.id === stale.id));
+  const context = await f.call('context_get', { task_id: task.id, query: 'invoice importer identity' });
+  assert.ok(context.included_ids.indexOf(current.id) < context.included_ids.indexOf(stale.id));
+  assert.match(context.included_reasons[current.id], /query terms/);
+  assert.match(context.included_reasons[current.id], /explicit task link/);
+});
+
+test('context collapses duplicate memory content and explains budget omissions', async t => {
+  const f = await fixture(t);
+  const first = await f.write('memory_record', { kind: 'fact', title: 'First copy', content: 'The retry window is five minutes.',
+    source: 'fixture', epistemic_status: 'observed' });
+  const second = await f.write('memory_record', { kind: 'fact', title: 'Second copy', content: 'The retry window is five minutes.',
+    source: 'fixture', epistemic_status: 'observed' });
+  const large = await f.write('memory_record', { kind: 'fact', title: 'Large note', content: 'x'.repeat(5000),
+    source: 'fixture', epistemic_status: 'observed' });
+  const context = await f.call('context_get', { max_chars: 1000 });
+  assert.ok(context.included_ids.includes(second.id));
+  assert.ok(!context.included_ids.includes(first.id));
+  assert.equal(context.omitted_reasons[first.id], 'duplicate memory content');
+  assert.equal(context.omitted_reasons[large.id], 'exceeds context budget');
+  assert.ok(context.chars <= 1000);
 });
 
 test('task reads and resume context explain blockers and reflect completed or reopened prerequisites', async t => {
@@ -377,6 +453,28 @@ test('memory supersession and forgetting never resurrect text through search or 
   assert.equal(retry.body.status, 'forgotten'); assert.equal(retry.body.content, undefined);
   assert.doesNotMatch(JSON.stringify(await f.call('project_export')), /Unique private pineapple/);
   assert.ok(updated.id);
+});
+
+test('memory review records provenance, edits validity, and rejects without losing audit history', async t => {
+  const f = await fixture(t);
+  let memory = await f.write('memory_record', { kind: 'fact', title: 'Invoice routing', content: 'Route invoices to queue A.',
+    source: 'old partner note', epistemic_status: 'observed', valid_from: '2026-01-01' });
+  assert.equal(memory.body.review_status, 'pending');
+  await assert.rejects(f.write('memory_review', { id: memory.id, expected_version: memory.version, action: 'reject' }), { code: 'REASON_REQUIRED' });
+  await assert.rejects(f.write('memory_review', { id: memory.id, expected_version: memory.version, action: 'edit', valid_until: '2025-12-31' }), { code: 'INVALID_DATE_RANGE' });
+  memory = await f.write('memory_review', { id: memory.id, expected_version: memory.version, action: 'edit',
+    content: 'Route invoices to queue B.', source: 'confirmed partner note', valid_until: '2026-12-31', reason: 'Partner correction.' });
+  assert.equal(memory.body.review_status, 'approved');
+  assert.equal(memory.body.valid_until, '2026-12-31');
+  assert.equal(memory.body.reviewed_by, 'codex-a');
+  assert.equal((await f.call('search', { query: 'queue B', kind: 'memory' })).records[0].id, memory.id);
+  memory = await f.write('memory_review', { id: memory.id, expected_version: memory.version, action: 'reject', reason: 'Partner withdrew this note.' });
+  assert.equal(memory.body.status, 'rejected');
+  assert.equal((await f.call('search', { query: 'queue B', kind: 'memory' })).records.length, 0);
+  assert.ok(!(await f.call('context_get', { query: 'queue B' })).included_ids.includes(memory.id));
+  const events = f.store.db.prepare('SELECT action,actor,version FROM events WHERE record_id=? ORDER BY seq').all(memory.id);
+  assert.deepEqual(events.map(event => event.action), ['created', 'review_edit', 'review_reject']);
+  assert.equal(events.at(-1).actor, 'codex-a');
 });
 
 test('context budget omits whole records and offers expansion', async t => {

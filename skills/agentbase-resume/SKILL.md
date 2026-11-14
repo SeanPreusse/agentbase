@@ -25,4 +25,6 @@ Capture useful state at meaningful milestones:
 
 When planning substantial work, use `plan_save` for outcomes, milestones and acceptance criteria, constraints, assumptions, and open questions. Connect tasks to the plan. Revise it when evidence changes the approach. This plugin does not authorize spawning agents, sending messages, changing permissions, or publishing work.
 
+After presenting a substantive implementation plan, if its milestones are not already tracked as AgentBase tasks, show the proposed milestones and offer once to add them as tasks. Ask in the final response so the user can review the plan first. If the user explicitly accepts, save the plan if needed and call `plan_tasks_create` with its current version and `confirmed_by_user: true`. Select only the milestones the user accepted, add dependencies only where work order is real, and report the created task IDs. A saved plan or a request to discuss a plan is not consent to create its tasks. Do not repeat the offer after a refusal or if matching tasks already exist.
+
 Keep capture concise and proportional to the task. Agentbase cannot automatically observe all host activity or guarantee a checkpoint after an unexpected termination. Do not represent memory capture as automatic unless it actually occurred.

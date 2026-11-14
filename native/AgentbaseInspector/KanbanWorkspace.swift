@@ -7,7 +7,22 @@ struct WorkspaceViewToggle: View {
             Text("Graph").tag("Graph")
             Text("Tasks").tag("Kanban")
             Text("Skills").tag("Skills")
-        }.pickerStyle(.segmented).labelsHidden().frame(width:205).help("Switch between graph, task board, and skill catalog")
+        }.pickerStyle(.segmented).labelsHidden().frame(width:225).help("Switch between graph, tasks, and skills")
+    }
+}
+struct WorkspaceNavigation: View {
+    @ObservedObject var model: Inspector
+    var projectDisabled = false
+    var body: some View {
+        HStack(spacing:10) {
+            Picker("Project",selection:Binding(get:{model.projectID ?? model.snapshot?.selected_project_id ?? ""},set:{model.selectProject($0)})) {
+                if model.projects.isEmpty {Text("No projects").tag("")}
+                Text("All Projects").tag(Inspector.allProjectsID)
+                if let id=model.projectID,id != Inspector.allProjectsID,!model.projects.contains(where:{$0.id==id}) {Text("Project unavailable").tag(id)}
+                ForEach(model.projects) {Text($0.displayName).tag($0.id)}
+            }.pickerStyle(.menu).labelsHidden().frame(width:180).disabled(projectDisabled).help(model.projectFolder)
+            WorkspaceViewToggle(model:model)
+        }.frame(height:32)
     }
 }
 struct KanbanColumn: Identifiable {
@@ -40,13 +55,7 @@ struct KanbanWorkspace: View {
             let height = max(CGFloat(250),geometry.size.height-(model.boardHasFilters ? 186 : 116))
             VStack(alignment:.leading,spacing:20) {
                 HStack(spacing:12) {
-                    Picker("Project",selection:Binding(get:{model.projectID ?? model.snapshot?.selected_project_id ?? ""},set:{model.selectProject($0)})) {
-                        if model.projects.isEmpty { Text("No projects").tag("") }
-                        Text("All Projects").tag(Inspector.allProjectsID)
-                        if let id=model.projectID,id != Inspector.allProjectsID,!model.projects.contains(where:{$0.id==id}) { Text("Project unavailable").tag(id) }
-                        ForEach(model.projects) { Text($0.displayName).tag($0.id) }
-                    }.pickerStyle(.menu).frame(maxWidth:220)
-                    WorkspaceViewToggle(model:model)
+                    WorkspaceNavigation(model:model)
                     RecentChangesButton(model:model)
                     ConnectionsButton(model:model.connections,selectedTask:model.selected?.kind == "task" ? model.selected : nil)
                     Spacer()
@@ -58,7 +67,7 @@ struct KanbanWorkspace: View {
                         Button("Reconnect") {model.start()}
                         Button("Choose data store…",action:model.chooseStore)
                     } label:{Image(systemName:"ellipsis")}.menuStyle(.borderlessButton).fixedSize().help("Board options")
-                }.padding(.horizontal,18).padding(.top,34)
+                }.padding(.leading,30).padding(.trailing,18).padding(.top,43)
                 if model.boardHasFilters {
                     HStack(spacing:10) {
                         Image(systemName:"line.3.horizontal.decrease.circle").foregroundStyle(accent)

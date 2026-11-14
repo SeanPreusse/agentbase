@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
-import { mkdtemp, mkdir, readFile, writeFile, cp, symlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, cp, symlink, rm, chmod } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync } from 'node:fs';
 import { installedPlugin, codexJson, PLUGIN_ID } from './lib/plugin-installation.mjs';
 import { startHost } from './lib/codex-host.mjs';
+import { writeMemoryFixture } from './lib/memory-fixture.mjs';
 const exec = promisify(execFile);
 const plugin = await installedPlugin();
 const directory = await mkdtemp(join(tmpdir(), 'agentbase-model-eval-'));
@@ -21,8 +21,9 @@ const reportOutput = outputFlag ? resolve(outputFlag.slice('--output='.length)) 
 const timeoutFlag = process.argv.find(arg => arg.startsWith('--timeout-seconds='));
 const phaseTimeout = timeoutFlag ? Number(timeoutFlag.split('=')[1]) : 300;
 assert.ok(Number.isInteger(phaseTimeout) && phaseTimeout >= 30 && phaseTimeout <= 900, 'Phase timeout must be 30–900 seconds.');
-const report = { status: 'running', plugin_version: plugin.version, phases: [], checks: [], limits: ['One synthetic scenario; not a reliability benchmark.'], model_calls: true };
-const env = { ...process.env, HOME: home, CODEX_HOME: codexHome };
+const report = { status: 'running', host: 'codex', plugin_version: plugin.version, phases: [], checks: [], limits: ['One synthetic scenario; not a reliability benchmark.'], model_calls: true };
+const env = { ...process.env, HOME: home, CODEX_HOME: codexHome, AGENTBASE_HOME: state };
+const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`;
 
 async function runModel(name, prompt, stopAtCheckpoint = false) {
   const events = [], tools = [];
@@ -91,9 +92,14 @@ try {
     `[plugins."${PLUGIN_ID}".mcp_servers.agentbase]\ndefault_tools_approval_mode="approve"\n`, { mode: 0o600 });
   const replica = join(directory, 'plugin');
   await cp(plugin.installedPath, replica, { recursive: true });
-  const mcp = JSON.parse(await readFile(join(replica, 'mcp.json'), 'utf8'));
-  mcp.mcpServers.agentbase.args.push('--home', state);
-  await writeFile(join(replica, 'mcp.json'), JSON.stringify(mcp, null, 2));
+  const manifestPath = join(replica, 'mcp.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const launcher = join(replica, 'bin', 'eval-launch.sh');
+  await writeFile(launcher, `#!/bin/sh\nexport AGENTBASE_HOME=${shellQuote(state)}\nexec ${shellQuote(join(replica, 'bin', 'agentbase-launch.sh'))}\n`, { mode: 0o700 });
+  await chmod(launcher, 0o700);
+  manifest.mcpServers.agentbase.command = './bin/eval-launch.sh';
+  manifest.mcpServers.agentbase.args = [];
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
   await codexJson(['plugin', 'marketplace', 'add', replica], { cwd: root, env });
   await codexJson(['plugin', 'add', PLUGIN_ID], { cwd: root, env });
   const probe = await startHost({ cwd: root, env });
@@ -101,41 +107,12 @@ try {
     const models = await probe.request('model/list', {});
     report.account_default_model = models.data.find(m => m.isDefault)?.model ?? null;
   } finally { await probe.stop(); }
-  await writeFile(join(root, 'package.json'), JSON.stringify({ type: 'module', scripts: { test: 'node --test' } }));
-  const originalImplementation = `export function importInvoices(existing, incoming) {
-  const seen = new Set(existing.map(row => row.invoice_number));
-  const result = [...existing];
-  for (const row of incoming) {
-    if (!seen.has(row.invoice_number)) { result.push({...row}); seen.add(row.invoice_number); }
-  }
-  return result;
-}\n`;
-  await writeFile(join(root, 'importer.mjs'), originalImplementation);
-  const originalTests = `import test from 'node:test';
-import assert from 'node:assert/strict';
-import {importInvoices} from './importer.mjs';
-test('retains invoices belonging to different customers',()=>{
-  const rows=[{customer_id:'a',invoice_number:'7',amount_cents:1234},{customer_id:'b',invoice_number:'7',amount_cents:5678}];
-  assert.deepEqual(importInvoices([],rows),rows);
-});
-test('repeat imports remain idempotent and preserve integer cents',()=>{
-  const rows=[{customer_id:'a',invoice_number:'7',amount_cents:1234}];
-  assert.deepEqual(importInvoices(rows,rows),rows);
-  assert.equal(Number.isInteger(importInvoices([],rows)[0].amount_cents),true);
-});
-test('composite identities do not collide when identifiers contain separators',()=>{
-  const rows=[{customer_id:'a:b',invoice_number:'c',amount_cents:1},{customer_id:'a',invoice_number:'b:c',amount_cents:2}];
-  assert.deepEqual(importInvoices([],rows),rows);
-});\n`;
-  await writeFile(join(root, 'importer.test.mjs'), originalTests);
-  const acceptancePath = join(directory, 'original-acceptance.test.mjs');
-  await writeFile(acceptancePath, originalTests.replace("'./importer.mjs'", JSON.stringify(pathToFileURL(join(root, 'importer.mjs')).href)));
-  await writeFile(join(root, 'README.md'), 'Invoice import fixture. Run `npm test` to check behaviour.\n');
+  const { originalImplementation, acceptancePath } = await writeMemoryFixture(root, directory);
   const first = await runModel('capture', `This project uses Agentbase. Investigate the invoice importer and plan the fix. Our partner reuses invoice numbers across customers, so identity must include customer_id and invoice_number. Amounts must remain integer cents and reimporting the same invoice must be idempotent. Investigate and plan only; do not edit the implementation or tests yet. We will implement in the next session. Work only in this fixture, apart from reading installed skill instructions. Do not spawn other agents.`, true);
   const captured = snapshot();
   await writeFile(join(reportOutput, 'capture-records.json'), JSON.stringify(captured, null, 2), { mode: 0o600 });
   check('Planning phase leaves implementation unchanged', await readFile(join(root, 'importer.mjs'), 'utf8') === originalImplementation);
-  check('Agentbase context retrieved', first.phase.tools.some(t => /context_get$/.test(t.tool) && t.status === 'completed' && !t.isError));
+  check('Agentbase context retrieved', first.phase.tools.some(t => /context_get$|project_resume$/.test(t.tool) && t.status === 'completed' && !t.isError));
   const knowledge = captured.filter(r => ['memory', 'decision'].includes(r.kind));
   check('Composite invoice identity recorded', knowledge.some(r => /customer/i.test(JSON.stringify(r.body)) && /invoice/i.test(JSON.stringify(r.body))));
   check('Integer-cents constraint recorded', knowledge.some(r => /integer/i.test(JSON.stringify(r.body)) && /cent/i.test(JSON.stringify(r.body))));
@@ -146,7 +123,7 @@ test('composite identities do not collide when identifiers contain separators',(
   check('No premature implementation completion', !captured.some(r => r.kind === 'task' && r.body.status === 'done' && !/investigat|plan|analys|diagnos/i.test(r.body.title)));
   const second = await runModel('resume', `Continue this project's unfinished work. Use its existing project context and verify the result. Work only in this fixture, apart from reading installed skill instructions. Do not spawn other agents.`);
   const after = snapshot();
-  check('Fresh session retrieves durable context', second.phase.tools.some(t => /context_get$/.test(t.tool) && t.status === 'completed' && !t.isError));
+  check('Fresh session retrieves durable context', second.phase.tools.some(t => /context_get$|project_resume$/.test(t.tool) && t.status === 'completed' && !t.isError));
   try { await exec(process.execPath, ['--test', acceptancePath], { cwd: root }); check('Implementation passes independent tests', true); }
   catch (error) { check('Implementation passes independent tests', false, error.stdout); }
   check('Completion includes evidence', after.some(r => r.kind === 'task' && r.body.status === 'done' && r.body.completion?.evidence?.length));

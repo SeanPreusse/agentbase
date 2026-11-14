@@ -1,7 +1,9 @@
 import AppKit
 import Foundation
 
-let destination = CommandLine.arguments.dropFirst().first ?? "assets/logo.png"
+let arguments = Array(CommandLine.arguments.dropFirst())
+let destination = arguments.first(where: { !$0.hasPrefix("--") }) ?? "assets/logo.png"
+let circular = arguments.contains("--circle")
 let size = 1024
 let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
@@ -22,7 +24,9 @@ func shape(_ points: [NSPoint]) -> NSBezierPath {
     path.close()
     return path
 }
-let background = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: size, height: size), xRadius: 224, yRadius: 224)
+let background = circular
+    ? NSBezierPath(ovalIn: NSRect(x: 24, y: 24, width: size - 48, height: size - 48))
+    : NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: size, height: size), xRadius: 224, yRadius: 224)
 NSGradient(starting: color(12, 23, 38), ending: color(20, 43, 53))!.draw(in: background, angle: -45)
 
 // Two folded ribbons form one sharp summit with an open base.

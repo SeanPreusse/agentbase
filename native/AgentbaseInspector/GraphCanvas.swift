@@ -312,13 +312,7 @@ struct GraphWorkspace: View {
     }
     var controls: some View {
         HStack(spacing:10) {
-            Picker("Project",selection:Binding(get:{ model.projectID ?? model.snapshot?.selected_project_id ?? "" },set:{ model.selectProject($0) })) {
-                if model.projects.isEmpty { Text("No projects").tag("") }
-                Text("All Projects").tag(Inspector.allProjectsID)
-                if let id = model.projectID, id != Inspector.allProjectsID, !model.projects.contains(where: { $0.id == id }) { Text("Project unavailable").tag(id) }
-                ForEach(model.projects) { Text($0.displayName).tag($0.id) }
-            }.labelsHidden().frame(maxWidth:170).help(model.projectFolder)
-            WorkspaceViewToggle(model:model)
+            WorkspaceNavigation(model:model)
             if !model.isAllProjects {
                 Button {if let id=model.currentProject?.id {model.showInGraph(id)}} label:{Image(systemName:"folder")}.buttonStyle(.plain).help("Project folder: " + model.projectFolder).accessibilityLabel("Project folder")
             }

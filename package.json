@@ -35,6 +35,8 @@
     "test:projects": "node scripts/test-project-management.mjs",
     "test:recovery": "node scripts/test-recovery.mjs",
     "eval:memory": "node scripts/evaluate-memory.mjs",
+    "eval:memory:claude": "node scripts/evaluate-memory-claude.mjs",
+    "eval:memory:deterministic": "npm run build && node scripts/evaluate-memory-deterministic.mjs",
     "plugin:up": "node scripts/plugin-dev.mjs up",
     "plugin:down": "node scripts/plugin-dev.mjs down",
     "plugin:status": "node scripts/plugin-dev.mjs status",

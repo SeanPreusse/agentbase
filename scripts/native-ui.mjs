@@ -20,7 +20,7 @@ const iconset = join(iconTemporary, 'AgentBase.iconset');
 try {
   await mkdir(iconset);
   for (const [name, size] of [['icon_16x16.png', 16], ['icon_16x16@2x.png', 32], ['icon_32x32.png', 32], ['icon_32x32@2x.png', 64], ['icon_128x128.png', 128], ['icon_128x128@2x.png', 256], ['icon_256x256.png', 256], ['icon_256x256@2x.png', 512], ['icon_512x512.png', 512], ['icon_512x512@2x.png', 1024]]) {
-    execFileSync('sips', ['-z', String(size), String(size), join(root, 'assets/logo.png'), '--out', join(iconset, name)], { stdio: 'ignore' });
+    execFileSync('sips', ['-z', String(size), String(size), join(root, 'assets/app-icon.png'), '--out', join(iconset, name)], { stdio: 'ignore' });
   }
   execFileSync('iconutil', ['-c', 'icns', '-o', join(resources, 'AgentBase.icns'), iconset], { stdio: 'inherit' });
 } finally { await rm(iconTemporary, { recursive: true, force: true }); }
@@ -42,7 +42,7 @@ await writeFile(join(contents, 'Info.plist'), `<?xml version="1.0" encoding="UTF
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>\n`);
-  execFileSync('xcrun', ['swiftc', '-parse-as-library', '-swift-version', '5', '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx14.0`, '-O', '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'Security', join(root, 'native/AgentbaseInspector/AgentbaseInspector.swift'), join(root, 'native/AgentbaseInspector/GraphCanvas.swift'), join(root, 'native/AgentbaseInspector/KanbanWorkspace.swift'), join(root, 'native/AgentbaseInspector/SkillWorkspace.swift'), join(root, 'native/AgentbaseInspector/ConnectionsWorkspace.swift'), join(root, 'native/AgentbaseInspector/BringYourOwnAI.swift'), join(root, 'native/AgentbaseInspector/AnalysisWorkspace.swift'), '-o', join(contents, 'MacOS/AgentbaseInspector')], { cwd: root, stdio: 'inherit' });
+  execFileSync('xcrun', ['swiftc', '-parse-as-library', '-swift-version', '5', '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx14.0`, '-O', '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'Security', join(root, 'native/AgentbaseInspector/AgentbaseInspector.swift'), join(root, 'native/AgentbaseInspector/GraphCanvas.swift'), join(root, 'native/AgentbaseInspector/KanbanWorkspace.swift'), join(root, 'native/AgentbaseInspector/MemoryWorkspace.swift'), join(root, 'native/AgentbaseInspector/SkillWorkspace.swift'), join(root, 'native/AgentbaseInspector/ConnectionsWorkspace.swift'), join(root, 'native/AgentbaseInspector/BringYourOwnAI.swift'), join(root, 'native/AgentbaseInspector/AnalysisWorkspace.swift'), '-o', join(contents, 'MacOS/AgentbaseInspector')], { cwd: root, stdio: 'inherit' });
 execFileSync('codesign', ['--force', '--deep', '--sign', '-', destination], { stdio: 'inherit' });
 console.log(`Built ${destination}`);
 if (process.argv.includes('--open')) {

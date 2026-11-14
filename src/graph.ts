@@ -58,7 +58,7 @@ export function projectGraph(db: DatabaseSync, projectId: string, options: Graph
     }
   }
   if (options.view === 'content') {
-    records = records.filter(r => r.body.graph_role !== 'background' && !['session','checkpoint'].includes(r.kind) && !['superseded','stale'].includes(r.body.status));
+    records = records.filter(r => r.body.graph_role !== 'background' && !['session','checkpoint'].includes(r.kind) && !['superseded','stale','rejected'].includes(r.body.status));
   }
   const nodes = new Map<string, GraphNode>(); const titles = new Map<string, string[]>();
   const searchable = new Map<string, string>();
@@ -167,7 +167,7 @@ export function projectSearch(db: DatabaseSync, projectId: string, input: string
     json_extract(body,'$.source') AS source,json_extract(body,'$.sql') AS sql,
     json_extract(body,'$.progress') AS progress,json_extract(body,'$.completion.summary') AS completion
     FROM records WHERE project_id=? AND COALESCE(json_extract(body,'$.status'),'')!='forgotten'
-    AND (? OR (COALESCE(json_extract(body,'$.graph_role'),'')!='background' AND kind NOT IN ('session','checkpoint') AND COALESCE(json_extract(body,'$.status'),'') NOT IN ('superseded','stale')))`)
+    AND (? OR (COALESCE(json_extract(body,'$.graph_role'),'')!='background' AND kind NOT IN ('session','checkpoint') AND COALESCE(json_extract(body,'$.status'),'') NOT IN ('superseded','stale','rejected')))`)
     .iterate(projectId,options.includeBackground ? 1 : 0)) {
     const body=[row.content,row.description,row.summary,row.goal,row.source,row.uri,row.sql,row.progress,row.completion].filter(v=>typeof v==='string').join(' ');
     const normalizedBody=normalize(body);const hit=words.map(word=>normalizedBody.indexOf(word)).filter(index=>index>=0).sort((a,b)=>a-b)[0] ?? 0;const start=Math.max(0,hit-60);

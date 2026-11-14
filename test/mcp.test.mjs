@@ -26,7 +26,7 @@ test('real stdio MCP exposes tools, validates input, and survives errors across 
   assert.equal(tools.tools.length, Object.keys(schemas).length);
   const readOnly = new Set(['mcp_status', 'graph_get', 'backup_verify', 'project_list', 'record_get', 'search', 'task_list',
     'handoff_get', 'context_get', 'dataset_inspect', 'project_export', 'skill_list', 'skill_recommend']);
-  const destructive = new Set(['project_attach', 'knowledge_save', 'graph_link', 'skill_save', 'plan_save', 'task_update', 'task_claim',
+  const destructive = new Set(['project_attach', 'knowledge_save', 'graph_link', 'skill_save', 'plan_save', 'plan_tasks_create', 'task_update', 'task_claim',
     'task_complete', 'memory_record', 'memory_update', 'checkpoint_save']);
   for (const tool of tools.tools) {
     assert.deepEqual(tool.annotations, toolAnnotations(tool.name));
@@ -143,6 +143,13 @@ test('real stdio MCP exposes tools, validates input, and survives errors across 
     id: claimed.structuredContent.id, expected_version: claimed.structuredContent.version, summary: 'Validated over stdio.',
     evidence: [{ kind: 'manual', reference: 'test/mcp.test.mjs', outcome: 'Real client calls returned structured results.' }] } });
   assert.equal(completed.isError, undefined);
+  const converted = await client.callTool({ name: 'plan_tasks_create', arguments: { project_id: project.id, actor: 'a', request_id: 'plan-tasks-once',
+    plan_id: plan.structuredContent.id, expected_version: plan.structuredContent.version, confirmed_by_user: true } });
+  assert.equal(converted.isError, undefined, JSON.stringify(converted.structuredContent));
+  assert.equal(converted.structuredContent.created_count, 1);
+  const convertedRetry = await client.callTool({ name: 'plan_tasks_create', arguments: { project_id: project.id, actor: 'a', request_id: 'plan-tasks-once',
+    plan_id: plan.structuredContent.id, expected_version: plan.structuredContent.version, confirmed_by_user: true } });
+  assert.deepEqual(convertedRetry.structuredContent, converted.structuredContent);
   const csv = join(root, 'measurements.csv'); await writeFile(csv, 'value\n2\n3\n');
   const dataset = await client.callTool({ name: 'dataset_import', arguments: { project_id: project.id, actor: 'a', request_id: 'dataset-once', name: 'measurements', path: csv } });
   if (dataset.isError) {

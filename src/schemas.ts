@@ -11,7 +11,8 @@ const page = { limit: z.number().int().min(1).max(100).default(30), offset: z.nu
 export const statuses = ['proposed', 'ready', 'in_progress', 'review', 'done', 'blocked', 'cancelled'] as const;
 const evidence = z.object({ kind: z.enum(['test', 'commit', 'file', 'analysis', 'manual']), reference: short, outcome: text });
 const taskSource = z.object({ kind: z.enum(['record', 'web', 'document', 'file']), reference: short, title: short.optional(), note: short.optional() });
-const memoryStatus = z.enum(['active', 'disputed', 'stale', 'superseded', 'forgotten']);
+const memoryStatus = z.enum(['active', 'disputed', 'stale', 'superseded', 'rejected', 'forgotten']);
+const validityDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD.');
 
 export const schemas = {
   mcp_status: z.object({ project_id: id.optional() }).strict(),
@@ -35,13 +36,16 @@ export const schemas = {
     milestones: z.array(z.object({ title: short, acceptance: text })).min(1).max(50),
     constraints: z.array(short).max(50).default([]), assumptions: z.array(short).max(50).default([]),
     open_questions: z.array(short).max(50).default([]) }).strict(),
-  task_create: z.object({ ...mutation, title: short, description: text, acceptance: z.array(short).min(1).max(30),
+  plan_tasks_create: z.object({ ...mutation, plan_id: id, expected_version: version,
+    confirmed_by_user: z.literal(true), milestone_indices: z.array(z.number().int().min(0)).min(1).max(50).optional(),
+    dependencies: z.array(z.object({ milestone_index: z.number().int().min(0), depends_on_index: z.number().int().min(0) }).strict()).max(100).default([]) }).strict(),
+  task_create: z.object({ ...mutation, title: short, description: text, acceptance: z.array(text).min(1).max(30),
     status: z.enum(['proposed', 'ready']).default('ready'), priority: z.number().int().min(0).max(4).default(2),
     dependencies: ids.default([]), related_ids: ids.default([]), sources: z.array(taskSource).max(100).default([]), plan_id: id.optional(), parent_task_id: id.optional(),
     requires_evidence: z.boolean().default(true) }).strict(),
   task_list: z.object({ ...project, status: z.enum(statuses).optional(), parent_task_id: id.optional(), ready_only: z.boolean().default(false), ...page }).strict(),
   task_update: z.object({ ...mutation, id, expected_version: version, title: short.optional(), description: text.optional(),
-    acceptance: z.array(short).min(1).max(30).optional(), dependencies: ids.optional(), sources: z.array(taskSource).max(100).optional(), parent_task_id: id.nullable().optional(),
+    acceptance: z.array(text).min(1).max(30).optional(), dependencies: ids.optional(), sources: z.array(taskSource).max(100).optional(), parent_task_id: id.nullable().optional(),
     priority: z.number().int().min(0).max(4).optional(),
     status: z.enum(['proposed', 'ready', 'review', 'blocked', 'cancelled']).optional(), reason: text.optional() }).strict(),
   task_claim: z.object({ ...mutation, id, expected_version: version,
@@ -51,8 +55,12 @@ export const schemas = {
   memory_record: z.object({ ...mutation, kind: z.enum(['fact', 'lesson', 'constraint', 'decision']), title: short, content: text,
     source: text, epistemic_status: z.enum(['observed', 'user_stated', 'inferred']), graph_role: z.enum(['content','background']).optional(),
     scope: z.enum(['project', 'task']).default('project'), task_id: id.optional(), related_ids: ids.default([]),
-    alternatives: z.array(short).max(30).default([]), supersedes: id.optional() }).strict(),
+    alternatives: z.array(short).max(30).default([]), supersedes: id.optional(), valid_from: validityDate.optional(), valid_until: validityDate.optional() }).strict(),
   memory_update: z.object({ ...mutation, id, expected_version: version, status: memoryStatus, graph_role: z.enum(['content','background']).optional(), reason: text }).strict(),
+  memory_review: z.object({ ...mutation, id, expected_version: version, action: z.enum(['approve','reject','edit']), reason: text.optional(),
+    title: short.optional(), content: text.optional(), source: text.optional(),
+    epistemic_status: z.enum(['observed','user_stated','inferred']).optional(),
+    valid_from: validityDate.nullable().optional(), valid_until: validityDate.nullable().optional() }).strict(),
   checkpoint_save: z.object({ ...mutation, session_id: id, task_id: id.optional(), summary: text, next_action: text,
     completed: z.array(short).max(50).default([]), remaining: z.array(short).max(50).default([]),
     blockers: z.array(short).max(30).default([]), failed_approaches: z.array(short).max(30).default([]),

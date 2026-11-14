@@ -408,7 +408,7 @@ struct InspectorView: View {
     private let panel = Color(red: 0.075, green: 0.09, blue: 0.105)
     var body: some View {
         GeometryReader { geometry in
-            let floatingSize=CGSize(width:model.selected?.kind == "analysis" ? min(560,geometry.size.width-36) : model.selected?.kind == "task" ? 400 : 360,height:max(240,min(650,geometry.size.height-100)))
+            let floatingSize=CGSize(width:model.selected?.kind == "analysis" ? min(560,geometry.size.width-36) : model.selected?.kind == "task" ? 400 : ["memory","decision"].contains(model.selected?.kind ?? "") ? 510 : 360,height:max(240,min(650,geometry.size.height-100)))
             let panelSize=expandedDetails ? CGSize(width:geometry.size.width-36,height:geometry.size.height-68) : floatingSize
             let compact=DetailPanelPlacement.clamped(panelPosition ?? CGPoint(x:geometry.size.width-floatingSize.width-18,y:34),size:floatingSize,container:geometry.size)
             let location=expandedDetails ? CGPoint(x:18,y:34) : DetailPanelPlacement.clamped(CGPoint(x:compact.x+panelDrag.width,y:compact.y+panelDrag.height),size:floatingSize,container:geometry.size)
@@ -416,7 +416,8 @@ struct InspectorView: View {
                 GraphWorkspace(model:model).frame(maxWidth:.infinity,maxHeight:.infinity)
                     .opacity(model.viewMode == "Graph" ? 1 : 0).allowsHitTesting(model.viewMode == "Graph").accessibilityHidden(model.viewMode != "Graph")
                 if model.viewMode == "Kanban" {KanbanWorkspace(model:model)}
-                if model.viewMode == "Skills" {SkillWorkspace(model:model)}
+                SkillWorkspace(model:model).frame(maxWidth:.infinity,maxHeight:.infinity)
+                    .opacity(model.viewMode == "Skills" ? 1 : 0).allowsHitTesting(model.viewMode == "Skills").accessibilityHidden(model.viewMode != "Skills")
                 if model.selectedID != nil {
                     VStack(spacing:0) {
                         HStack {
@@ -534,7 +535,7 @@ struct InspectorView: View {
                         if entry.kind == "plan" { detailText("Goal", entry.text("goal")); if let milestones = entry.body["milestones"]?.raw as? [[String: Any]] { ForEach(Array(milestones.enumerated()), id: \.offset) { index, milestone in detailText("\(index + 1). \(milestone["title"] as? String ?? "Milestone")", milestone["acceptance"] as? String ?? "") } }; stringList("Constraints", entry.body["constraints"]); stringList("Open questions", entry.body["open_questions"]) }
                         if entry.kind == "dataset" { detailText("Source", entry.text("source")); resultPreview(entry, isDataset: true) }
                         if !entry.text("node_type").isEmpty { detailText("Resource", entry.text("uri")) }
-                        if ["memory", "decision"].contains(entry.kind) { detailText("Content", entry.text("content")); detailText("Source", entry.text("source")) }
+                        if ["memory", "decision"].contains(entry.kind) { MemoryDetail(model:model,entry:entry).id("\(entry.id)-\(entry.version)") }
                         if entry.kind == "analysis" {AnalysisWorkspace(entry:entry,expanded:expandedDetails).id(entry.id);detailText("SQL",entry.text("sql"));detailText("Interpretation",entry.text("interpretation"))}
                         let graphEdges = (model.snapshot?.graph?.edges ?? []).filter { edge in
                             guard edge.source == entry.id || edge.target == entry.id else {return false}
@@ -611,6 +612,11 @@ struct InspectorView: View {
 
 #if !INSPECTOR_TESTING
 @main struct AgentbaseInspectorApp: App {
+    init() {
+        if let url=Bundle.main.url(forResource:"AgentBase",withExtension:"icns"), let icon=NSImage(contentsOf:url) {
+            NSApplication.shared.applicationIconImage=icon
+        }
+    }
     var body: some Scene {
         WindowGroup("AgentBase") { InspectorView() }.defaultSize(width: 1440, height: 920).windowStyle(.hiddenTitleBar)
             .commands { CommandGroup(replacing: .newItem) {} }
