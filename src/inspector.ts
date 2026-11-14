@@ -203,6 +203,8 @@ export function inspectorSnapshot(home: string, projectId?: string, recordId?: s
 export async function watchInspector(home: string, projectId?: string, recordId?: string, options: { includeBackground?: boolean; taskLimit?: number; workingRoot?: string; search?: string } = {}) {
   let stop = false;
   const derivedCache: DerivedCache = { revision: 0 };
+  let snapshotDirty = true;
+  let lastSnapshotAt = 0;
   let monitor: DatabaseSync | undefined;
   let monitorIdentity = '';
   const stopWatching = () => { stop = true; };
@@ -214,23 +216,28 @@ export async function watchInspector(home: string, projectId?: string, recordId?
       if (existsSync(filename)) {
         try {
           const file = statSync(filename), identity = `${file.dev}:${file.ino}`;
-          if (identity !== monitorIdentity) { monitor?.close(); monitor = new DatabaseSync(filename, { readOnly: true, timeout: 1000 }); monitorIdentity = identity; derivedCache.revision++; }
+          if (identity !== monitorIdentity) { monitor?.close(); monitor = new DatabaseSync(filename, { readOnly: true, timeout: 1000 }); monitorIdentity = identity; derivedCache.revision++; snapshotDirty = true; }
           const dataVersion = Number(monitor!.prepare('PRAGMA data_version').get()?.data_version ?? 0);
           if (Number.isFinite(dataVersion)) {
-            if (derivedCache.dataVersion !== undefined && derivedCache.dataVersion !== dataVersion) derivedCache.revision++;
+            if (derivedCache.dataVersion !== undefined && derivedCache.dataVersion !== dataVersion) { derivedCache.revision++; snapshotDirty = true; }
             derivedCache.dataVersion = dataVersion;
-          } else derivedCache.revision++;
+          } else { derivedCache.revision++; snapshotDirty = true; }
         } catch {
-          monitor?.close(); monitor = undefined; monitorIdentity = ''; derivedCache.revision++;
+          monitor?.close(); monitor = undefined; monitorIdentity = ''; derivedCache.revision++; snapshotDirty = true;
         }
       } else {
-        monitor?.close(); monitor = undefined; monitorIdentity = ''; derivedCache.revision++;
+        if (monitor || monitorIdentity) { monitor?.close(); monitor = undefined; monitorIdentity = ''; derivedCache.revision++; snapshotDirty = true; }
       }
-      const line = JSON.stringify(inspectorSnapshot(home, projectId, recordId, { ...options, derivedCache })) + '\n';
-      if (!process.stdout.write(line)) await new Promise<void>(resolve => {
-        const finish = () => { process.stdout.removeListener('drain', finish); process.stdout.removeListener('error', finish); resolve(); };
-        process.stdout.once('drain', finish); process.stdout.once('error', finish);
-      });
+      const now = Date.now();
+      if (snapshotDirty || now - lastSnapshotAt >= 5000) {
+        const line = JSON.stringify(inspectorSnapshot(home, projectId, recordId, { ...options, derivedCache })) + '\n';
+        if (!process.stdout.write(line)) await new Promise<void>(resolve => {
+          const finish = () => { process.stdout.removeListener('drain', finish); process.stdout.removeListener('error', finish); resolve(); };
+          process.stdout.once('drain', finish); process.stdout.once('error', finish);
+        });
+        snapshotDirty = false;
+        lastSnapshotAt = now;
+      }
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
   } finally { monitor?.close(); process.removeListener('SIGTERM', stopWatching); process.removeListener('SIGINT', stopWatching); }
